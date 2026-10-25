@@ -87,7 +87,17 @@ jobs:
       - name: Compilar APK de testes
         env:
           PYTHONFORANDROID_PREREQUISITES_INSTALL_INTERACTIVE: "0"
-        run: buildozer -v android debug
+        # O log completo vai para buildozer.log (enviado como artefato se falhar)
+        # e as últimas linhas, onde costuma estar o erro, para erro_resumo.txt.
+        run: |
+          set +e
+          buildozer -v android debug 2>&1 | tee buildozer.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            sed 's/\x1b\[[0-9;]*m//g' buildozer.log | tail -n 300 > erro_resumo.txt
+          fi
+          exit $status
 
       - name: Enviar APK
         if: success()
@@ -102,5 +112,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: log-erro-android
-          path: .buildozer/android/platform/build-*/**/*.log
+          path: |
+            erro_resumo.txt
+            buildozer.log
           if-no-files-found: ignore
