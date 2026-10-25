@@ -30,9 +30,12 @@ android.ndk = 28c
 android.ndk_api = 24
 android.accept_sdk_license = True
 
-# python-for-android fixado na versão estável v2026.05.09
-# (sem isso o buildozer baixa o "master", que muda a qualquer momento).
-p4a.branch = v2026.05.09
+# python-for-android v2026.05.09 com a correção do PR #3360 aplicada
+# (bug "cannot import name 'BuildDependencyInstallError'", issue #3364).
+# O workflow .github/workflows/android.yml baixa e corrige essa cópia em ~/p4a-nexo.
+# Para compilar fora do GitHub, rode antes os mesmos comandos da etapa
+# "Baixar python-for-android e aplicar correção" do workflow.
+p4a.source_dir = ~/p4a-nexo
 
 # ---------------- iOS ----------------
 # O build iOS é feito pelo workflow .github/workflows/ios.yml (kivy-ios),
