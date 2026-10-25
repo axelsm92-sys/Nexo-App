@@ -50,6 +50,33 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "buildozer==1.6.0" "cython==0.29.36" setuptools
 
+      - name: Baixar python-for-android e aplicar correção
+        # A v2026.05.09 reaproveita a pasta "venv" entre as arquiteturas
+        # (armeabi-v7a -> arm64-v8a) e mistura pip 26 com pip 25.3, causando
+        # "cannot import name 'BuildDependencyInstallError'" (issue #3364).
+        # Aplica a correção oficial do PR #3360: venv --clear e sem "pip install -U pip".
+        run: |
+          rm -rf "$HOME/p4a-nexo"
+          git clone --depth 1 --branch v2026.05.09 https://github.com/kivy/python-for-android.git "$HOME/p4a-nexo"
+          python - "$HOME/p4a-nexo/pythonforandroid/build.py" <<'EOF'
+          import sys, pathlib
+          path = pathlib.Path(sys.argv[1])
+          src = path.read_text()
+          old_venv = "shprint(host_python, '-m', 'venv', 'venv')"
+          new_venv = "shprint(host_python, '-m', 'venv', '--clear', 'venv')"
+          old_upgrade = (
+              "        info('Upgrade pip to latest version')\n"
+              "        shprint(sh.bash, '-c', (\n"
+              "            \"source venv/bin/activate && pip install -U pip\"\n"
+              "        ), _env=copy.copy(base_env))\n"
+          )
+          if old_venv not in src or old_upgrade not in src:
+              sys.exit("ERRO: trecho esperado não encontrado em build.py; a correção não foi aplicada.")
+          path.write_text(src.replace(old_venv, new_venv).replace(old_upgrade, ""))
+          print("Correção PR #3360 aplicada em", path)
+          EOF
+          grep -n "venv', '--clear'" "$HOME/p4a-nexo/pythonforandroid/build.py"
+
       - name: Cache do Buildozer (SDK/NDK)
         uses: actions/cache@v4
         with:
