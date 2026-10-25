@@ -1,0 +1,106 @@
+name: Gerar APK Nexo Alpha
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-android:
+    # Mesma base usada pelo próprio python-for-android (Docker ubuntu:22.04).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Liberar espaço em disco
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY/CodeQL" || true
+          df -h /
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Java 17 (exigido pelo Gradle/AGP 8)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip \
+            autoconf automake autopoint gettext libtool libltdl-dev pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
+            cmake ccache libffi-dev libssl-dev lbzip2 patch
+
+      - name: Instalar Buildozer
+        # Não instale python-for-android via pip: o buildozer clona a versão
+        # definida em "p4a.branch" no buildozer.spec. Ter duas versões
+        # diferentes (pip x clone) causava conflito de dependências.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "buildozer==1.6.0" "cython==0.29.36" setuptools
+
+      - name: Baixar python-for-android e aplicar correção
+        # A v2026.05.09 reaproveita a pasta "venv" entre as arquiteturas
+        # (armeabi-v7a -> arm64-v8a) e mistura pip 26 com pip 25.3, causando
+        # "cannot import name 'BuildDependencyInstallError'" (issue #3364).
+        # Aplica a correção oficial do PR #3360: venv --clear e sem "pip install -U pip".
+        run: |
+          rm -rf "$HOME/p4a-nexo"
+          git clone --depth 1 --branch v2026.05.09 https://github.com/kivy/python-for-android.git "$HOME/p4a-nexo"
+          python - "$HOME/p4a-nexo/pythonforandroid/build.py" <<'EOF'
+          import sys, pathlib
+          path = pathlib.Path(sys.argv[1])
+          src = path.read_text()
+          old_venv = "shprint(host_python, '-m', 'venv', 'venv')"
+          new_venv = "shprint(host_python, '-m', 'venv', '--clear', 'venv')"
+          old_upgrade = (
+              "        info('Upgrade pip to latest version')\n"
+              "        shprint(sh.bash, '-c', (\n"
+              "            \"source venv/bin/activate && pip install -U pip\"\n"
+              "        ), _env=copy.copy(base_env))\n"
+          )
+          if old_venv not in src or old_upgrade not in src:
+              sys.exit("ERRO: trecho esperado não encontrado em build.py; a correção não foi aplicada.")
+          path.write_text(src.replace(old_venv, new_venv).replace(old_upgrade, ""))
+          print("Correção PR #3360 aplicada em", path)
+          EOF
+          grep -n "venv', '--clear'" "$HOME/p4a-nexo/pythonforandroid/build.py"
+
+      - name: Cache do Buildozer (SDK/NDK)
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-global-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-global-
+
+      - name: Compilar APK de testes
+        env:
+          PYTHONFORANDROID_PREREQUISITES_INSTALL_INTERACTIVE: "0"
+        run: buildozer -v android debug
+
+      - name: Enviar APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nexo-Alpha-0.1-Android
+          path: bin/*.apk
+          if-no-files-found: error
+
+      - name: Enviar log em caso de erro
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-erro-android
+          path: .buildozer/android/platform/build-*/**/*.log
+          if-no-files-found: ignore
