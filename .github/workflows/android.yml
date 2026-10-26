@@ -50,32 +50,32 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "buildozer==1.6.0" "cython==0.29.36" setuptools
 
-      - name: Baixar python-for-android e aplicar correção
-        # A v2026.05.09 reaproveita a pasta "venv" entre as arquiteturas
-        # (armeabi-v7a -> arm64-v8a) e mistura pip 26 com pip 25.3, causando
-        # "cannot import name 'BuildDependencyInstallError'" (issue #3364).
-        # Aplica a correção oficial do PR #3360: venv --clear e sem "pip install -U pip".
+      - name: Baixar python-for-android (commit fixo com correções)
+        # Por que não usar a tag v2026.05.09:
+        #  1) ela instala os pacotes Python com o pip do host (x86_64), sem as
+        #     tags de plataforma Android. Desde que o PyPI passou a ter wheels
+        #     Android (ex.: charset_normalizer 3.5.2 para arm64), o build falha com
+        #     "charset_normalizer-...-android_24_arm64_v8a.whl is not a supported
+        #     wheel on this platform" (e no armeabi-v7a instalava o chardet
+        #     compilado para x86_64, que não funcionaria no celular);
+        #  2) bug do venv/pip 26 "BuildDependencyInstallError" (issue #3364).
+        # Ambos foram corrigidos no branch develop (PR #3360 e PR #3366), mas
+        # ainda não há tag nova. Fixamos um commit específico para o build ser
+        # reproduzível. Quando sair uma versão nova do p4a, troque P4A_COMMIT.
+        env:
+          P4A_COMMIT: 725804ad06527fbfacb514add9a67ea7e7ee8683
         run: |
           rm -rf "$HOME/p4a-nexo"
-          git clone --depth 1 --branch v2026.05.09 https://github.com/kivy/python-for-android.git "$HOME/p4a-nexo"
-          python - "$HOME/p4a-nexo/pythonforandroid/build.py" <<'EOF'
-          import sys, pathlib
-          path = pathlib.Path(sys.argv[1])
-          src = path.read_text()
-          old_venv = "shprint(host_python, '-m', 'venv', 'venv')"
-          new_venv = "shprint(host_python, '-m', 'venv', '--clear', 'venv')"
-          old_upgrade = (
-              "        info('Upgrade pip to latest version')\n"
-              "        shprint(sh.bash, '-c', (\n"
-              "            \"source venv/bin/activate && pip install -U pip\"\n"
-              "        ), _env=copy.copy(base_env))\n"
-          )
-          if old_venv not in src or old_upgrade not in src:
-              sys.exit("ERRO: trecho esperado não encontrado em build.py; a correção não foi aplicada.")
-          path.write_text(src.replace(old_venv, new_venv).replace(old_upgrade, ""))
-          print("Correção PR #3360 aplicada em", path)
-          EOF
-          grep -n "venv', '--clear'" "$HOME/p4a-nexo/pythonforandroid/build.py"
+          git init -q "$HOME/p4a-nexo"
+          cd "$HOME/p4a-nexo"
+          git remote add origin https://github.com/kivy/python-for-android.git
+          git fetch -q --depth 1 origin "$P4A_COMMIT"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='p4a em uso: %H (%cd)'
+          # Confere se a correção do PR #3366 está presente (pip com tags Android, sem venv).
+          if grep -q "'venv'" pythonforandroid/build.py; then
+            echo "ERRO: este commit do p4a ainda usa o venv antigo; escolha um commit mais novo."; exit 1
+          fi
 
       - name: Cache do Buildozer (SDK/NDK)
         uses: actions/cache@v4
