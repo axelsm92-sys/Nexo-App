@@ -1,0 +1,7 @@
+.venv-pc/
+__pycache__/
+.buildozer/
+bin/
+*.db
+erro_nexo.txt
+logs_*.zip
