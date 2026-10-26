@@ -4,7 +4,7 @@ package.name = nexofinancas
 package.domain = br.com.nexofinancas
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,atlas
-source.exclude_dirs = .git,.github,__pycache__,.kivy,bin,.buildozer,.spyproject
+source.exclude_dirs = .git,.github,__pycache__,.kivy,bin,.buildozer,.spyproject,.venv-pc
 version = 0.1.0
 
 # sqlite3 é obrigatório: o app usa "import sqlite3" e, no Android,
@@ -30,11 +30,11 @@ android.ndk = 28c
 android.ndk_api = 24
 android.accept_sdk_license = True
 
-# python-for-android v2026.05.09 com a correção do PR #3360 aplicada
-# (bug "cannot import name 'BuildDependencyInstallError'", issue #3364).
-# O workflow .github/workflows/android.yml baixa e corrige essa cópia em ~/p4a-nexo.
+# python-for-android do branch develop (commit fixo definido em P4A_COMMIT
+# no workflow .github/workflows/android.yml). A tag v2026.05.09 falha com
+# "charset_normalizer ... android_24_arm64_v8a.whl is not a supported wheel".
 # Para compilar fora do GitHub, rode antes os mesmos comandos da etapa
-# "Baixar python-for-android e aplicar correção" do workflow.
+# "Baixar python-for-android" do workflow.
 p4a.source_dir = ~/p4a-nexo
 
 # ---------------- iOS ----------------
