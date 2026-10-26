@@ -6,7 +6,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.spinner import Spinner
 from kivy.uix.scrollview import ScrollView
 from graficos import bar_row, PALETTE
-from cartao_credito import invoices, add_month
+from cartao_credito import invoices, add_month, paid_category_totals
 
 def initialize(db):
     db.execute("CREATE TABLE IF NOT EXISTS fixos_mensais (fixo_id INTEGER NOT NULL, mes TEXT NOT NULL, valor REAL NOT NULL, nome TEXT NOT NULL, PRIMARY KEY(fixo_id,mes))")
@@ -46,13 +46,9 @@ def category_spending(db,month):
     result={}
     for cat,value in db.execute("SELECT categoria,COALESCE(SUM(valor),0) FROM transacoes WHERE tipo='Despesa' AND fixo_id IS NULL AND substr(data,1,7)=? GROUP BY categoria",(month,)):
         result[cat]=result.get(cat,0)+value
-    for cid,_,_,_,paid in invoices(db,month):
-        if not paid:continue
-        for cat,val,n,first in db.execute('SELECT categoria,valor_total,parcelas,primeiro_mes FROM compras_cartao WHERE cartao_id=?',(cid,)):
-            for i in range(n):
-                if add_month(first,i)==month:
-                    cents=round(val*100);base=cents//n
-                    result[cat]=result.get(cat,0)+(base+(cents-base*n if i==n-1 else 0))/100
+    # Parcelas e assinaturas de faturas pagas.
+    for cat,value in paid_category_totals(db,month).items():
+        result[cat]=result.get(cat,0)+value
     return result
 
 def limit(db,category,month):

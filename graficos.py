@@ -93,16 +93,10 @@ def show(app):
     categories=defaultdict(float)
     for cat,v,f,t in rows:
         if t=='Despesa':categories[cat]+=float(v)
-    # Compras no credito so entram na analise depois de pagar a fatura.
-    for card_id,_,_,_,paid in bills:
-        if not paid:continue
-        purchases=app.db.execute('SELECT categoria,valor_total,parcelas,primeiro_mes FROM compras_cartao WHERE cartao_id=?',(card_id,)).fetchall()
-        from cartao_credito import add_month
-        for cat,value,n,first in purchases:
-            for i in range(n):
-                if add_month(first,i)==month:
-                    cents=round(value*100);base=cents//n
-                    categories[cat]+=(base+(cents-base*n if i==n-1 else 0))/100
+    # Parcelas e assinaturas do credito so entram na analise depois de pagar a fatura.
+    from cartao_credito import paid_category_totals
+    for cat,value in paid_category_totals(app.db,month).items():
+        categories[cat]+=value
     ranked=sorted(categories.items(),key=lambda item:-item[1])
     if not ranked:body.add_widget(app.label('Nenhuma categoria com gastos registrados.',13,app.MUTED,48))
     maximum=max((v for _,v in ranked),default=0)
