@@ -9,6 +9,10 @@ jobs:
   build-ios:
     runs-on: macos-latest
     timeout-minutes: 150
+    defaults:
+      run:
+        # pipefail: se o comando falhar, a etapa falha mesmo com o "| tee" do log.
+        shell: bash -o pipefail -e {0}
     env:
       APP_TITLE: Nexo
       APP_LOWER: nexo
@@ -25,10 +29,11 @@ jobs:
 
       - name: Instalar dependências
         run: |
-          brew install autoconf automake libtool pkg-config libjpeg || true
+          echo "== macOS: $(sw_vers -productVersion) | Xcode: $(xcodebuild -version | head -1) | $(python --version)" | tee -a ios_build.log
+          brew install autoconf automake libtool pkg-config libjpeg 2>&1 | tee -a ios_build.log || true
           brew link libtool || true
-          python -m pip install --upgrade pip
-          python -m pip install wheel sh "Cython==0.29.36" "kivy-ios==2025.5.17"
+          python -m pip install --upgrade pip 2>&1 | tee -a ios_build.log
+          python -m pip install wheel sh "Cython==0.29.36" "kivy-ios==2025.5.17" 2>&1 | tee -a ios_build.log
 
       - name: Cache do kivy-ios (Python e Kivy compilados)
         uses: actions/cache@v4
@@ -40,9 +45,9 @@ jobs:
 
       - name: Compilar Python + Kivy para iOS
         run: |
-          toolchain build python3 openssl kivy
+          toolchain build python3 openssl kivy 2>&1 | tee -a ios_build.log
           # certifi: certificados para HTTPS (integração Pluggy).
-          toolchain pip install certifi
+          toolchain pip install certifi 2>&1 | tee -a ios_build.log
 
       - name: Preparar pasta do app (somente código e imagens)
         run: |
@@ -55,7 +60,7 @@ jobs:
       - name: Criar projeto Xcode
         run: |
           rm -rf "${APP_LOWER}-ios"
-          toolchain create "$APP_TITLE" app_ios
+          toolchain create "$APP_TITLE" app_ios 2>&1 | tee -a ios_build.log
           ls "${APP_LOWER}-ios"
 
       - name: Compilar para o Simulador do iOS
@@ -65,7 +70,7 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build_sim \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 build
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 build 2>&1 | tee -a ios_build.log
 
       - name: Compilar para iPhone (sem assinatura) e gerar .ipa
         run: |
@@ -74,7 +79,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build_device \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-            CODE_SIGNING_ALLOWED=NO build
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee -a ios_build.log
           APP_PATH=$(find build_device -name "*.app" -path "*Release-iphoneos*" | head -n 1)
           echo "App gerado: $APP_PATH"
           if [ -z "$APP_PATH" ]; then echo "ERRO: .app do iPhone não foi gerado"; exit 1; fi
@@ -92,3 +97,20 @@ jobs:
           name: Nexo-Alpha-0.1-iOS
           path: Nexo-Alpha-0.1-unsigned.ipa
           if-no-files-found: error
+
+      - name: Resumo do log
+        if: always()
+        run: |
+          # Últimas linhas (onde costuma estar o erro) + linhas com "error".
+          { echo "=== ULTIMAS 300 LINHAS ==="; tail -n 300 ios_build.log 2>/dev/null;
+            echo; echo "=== LINHAS COM ERRO ==="; grep -n -i -E "error|failed|exception" ios_build.log 2>/dev/null | tail -n 80; } > erro_resumo_ios.txt || true
+
+      - name: Publicar log do build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-ios
+          path: |
+            erro_resumo_ios.txt
+            ios_build.log
+          if-no-files-found: ignore
