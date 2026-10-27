@@ -45,7 +45,9 @@ jobs:
         run: |
           mkdir -p app_ios
           cp *.py *.png app_ios/
-          ls -la app_ios
+          # Ícones da barra inferior e dos botões (sem isso o app fica sem imagens).
+          cp -R icones app_ios/
+          ls -la app_ios app_ios/icones
 
       - name: Criar projeto Xcode
         run: |
@@ -72,6 +74,11 @@ jobs:
             CODE_SIGNING_ALLOWED=NO build
           APP_PATH=$(find build_device -name "*.app" -path "*Release-iphoneos*" | head -n 1)
           echo "App gerado: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then echo "ERRO: .app do iPhone não foi gerado"; exit 1; fi
+          # Conferências: binário para iPhone (arm64), ícones e tamanho do pacote.
+          lipo -info "$APP_PATH/$APP_LOWER" || file "$APP_PATH/$APP_LOWER"
+          ls "$APP_PATH/YourApp/icones" 2>/dev/null || find "$APP_PATH" -maxdepth 3 -name icones
+          du -sh "$APP_PATH"
           mkdir -p ipa/Payload
           cp -R "$APP_PATH" ipa/Payload/
           (cd ipa && zip -qry "../Nexo-Alpha-0.1-unsigned.ipa" Payload)
