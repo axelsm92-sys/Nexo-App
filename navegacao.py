@@ -112,6 +112,7 @@ def create(app):
         "categorias": "custos",
         "salario": "ajustes",
         "pluggy": "ajustes",
+        "movimentacoes": "inicio",
     }.get(app.page, app.page)
 
     for title, page in ITEMS:

@@ -212,6 +212,11 @@ def should_ignore(tx):
 
 
 def category_for(db, tx):
+    # 1º: regra criada pelo usuário ("aplicar a todas com esta descrição").
+    import movimentacoes
+    rule = movimentacoes.rule_for(db, tx.get('description') or '')
+    if rule:
+        return rule
     cid = str(tx.get('categoryId') or '')
     for prefix, name in MAPA_CATEGORIAS:
         if cid.startswith(prefix):
@@ -304,9 +309,12 @@ def _reconcile(db, table, account_id, items, date_from, date_to, date_col, prote
         seen.add(ext)
         vals = it['valores']
         cols = list(vals.keys())
-        if ext in existing or db.execute(f'SELECT 1 FROM {table} WHERE externo_id=?', (ext,)).fetchone():
-            db.execute(f'UPDATE {table} SET ' + ','.join(c + '=?' for c in cols) + ' WHERE externo_id=?',
-                       [vals[c] for c in cols] + [ext])
+        found = db.execute(f'SELECT COALESCE(categoria_manual,0) FROM {table} WHERE externo_id=?', (ext,)).fetchone()
+        if ext in existing or found:
+            # Categoria escolhida pelo usuário nunca é sobrescrita pela sincronização.
+            upd = [c for c in cols if not (c == 'categoria' and found and found[0])]
+            db.execute(f'UPDATE {table} SET ' + ','.join(c + '=?' for c in upd) + ' WHERE externo_id=?',
+                       [vals[c] for c in upd] + [ext])
             updated += 1
             continue
         # A Pluggy pode recriar a transação com outro id: casa por data+valor+descrição.

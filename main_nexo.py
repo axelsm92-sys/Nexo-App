@@ -28,6 +28,7 @@ import navegacao
 import periodo
 import planejamento
 import integracao_pluggy
+import movimentacoes
 
 BG=(.059,.090,.165,1); CARD=(.11,.15,.21,1); WHITE=(.97,.98,.99,1)
 MUTED=(.62,.68,.74,1); GREEN=(.063,.725,.506,1); RED=(.96,.48,.47,1)
@@ -221,6 +222,7 @@ class FinanceApp(App):
         credito.initialize(self.db)
         planejamento.initialize(self.db)
         integracao_pluggy.initialize(self.db)
+        movimentacoes.initialize(self.db)
         self.view_month=date.today().strftime('%Y-%m')
         self.money=money;self.parse_amount=parse_amount;self.label=label;self.button=button;self.input_field=input_field;self.money_field=money_field;self.panel=panel;self.spinner=spinner
         self.WHITE=WHITE;self.MUTED=MUTED;self.GREEN=GREEN;self.RED=RED
@@ -270,7 +272,7 @@ class FinanceApp(App):
         sc=ScrollView();body=BoxLayout(orientation='vertical',padding=dp(18),spacing=dp(12),size_hint_y=None)
         body.bind(minimum_height=body.setter('height'))
         body.add_widget(label(title,23,WHITE,48,True))
-        if self.page in ('inicio','custos','fixos','categorias','cartao','graficos','planejamento'):
+        if self.page in ('inicio','custos','fixos','categorias','cartao','graficos','planejamento','movimentacoes'):
             body.add_widget(periodo.create(self))
         sc.add_widget(body);self.root_box.add_widget(sc)
         self.root_box.add_widget(navegacao.create(self))
@@ -305,6 +307,7 @@ class FinanceApp(App):
         if self.page=='planejamento':return planejamento.show(self)
         if self.page=='salario':return self.show_salary()
         if self.page=='pluggy':return integracao_pluggy.show(self)
+        if self.page=='movimentacoes':return movimentacoes.show(self)
         if self.page=='fixos':return self.show_fixed()
         if self.page=='categorias':return self.show_categories()
         self.show_home()
@@ -375,6 +378,7 @@ class FinanceApp(App):
         summary=BoxLayout(orientation='vertical',size_hint_y=None,height=dp(164))
         for x in [label('Disponivel (salarios + outras receitas - gastos)',12,MUTED,36),label(money(total_salary+income-expense),26,WHITE,48,True),label('Salarios cadastrados: '+money(total_salary),13,GREEN),label('Outras receitas: '+money(income),13,GREEN),label('Despesas pagas/lancadas: '+money(expense),13,RED)]:summary.add_widget(x)
         body.add_widget(panel(summary))
+        body.add_widget(movimentacoes.connected_accounts_panel(self))
         periods=BoxLayout(orientation='vertical',size_hint_y=None,height=dp(155))
         for x in [label('1 a 14: mensal - gastos do periodo',13,MUTED),label(money(monthly-first),19,WHITE,39,True),label('15 ao fim: quinzenal - gastos do periodo',13,MUTED),label(money(advance-second),19,WHITE,39,True)]:periods.add_widget(x)
         body.add_widget(panel(periods))
@@ -397,15 +401,7 @@ class FinanceApp(App):
         actions.add_widget(icon_button('Ver gráficos', 'ver_graficos.png',
                                        lambda *_: self.go('graficos'), height=64))
         body.add_widget(actions)
-        body.add_widget(label('Transacoes do mes',18,WHITE,37,True))
-        transactions=self.db.execute('SELECT descricao,categoria,tipo,valor,data,pagamento FROM transacoes WHERE substr(data,1,7)=? ORDER BY data DESC,id DESC LIMIT 40',(month,)).fetchall()
-        if not transactions:body.add_widget(label('Nenhuma transacao neste mes.',14,MUTED,38))
-        for desc,cat,kind,value,day,pay in transactions:
-            box=BoxLayout(orientation='vertical',size_hint_y=None,height=dp(77))
-            box.add_widget(label(desc,16,WHITE,27,True))
-            box.add_widget(label(cat+'  |  '+day+'  |  '+(pay or 'Outro'),12,MUTED,22))
-            box.add_widget(label(('+' if kind=='Receita' else '-')+' '+money(value),14,GREEN if kind=='Receita' else RED,25))
-            body.add_widget(panel(box))
+        body.add_widget(movimentacoes.latest_panel(self,month))
 
     def show_variable_spending(self,*_):
         """Análise dos gastos variáveis, excluindo fixos e faturas."""
