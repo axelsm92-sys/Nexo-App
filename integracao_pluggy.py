@@ -55,8 +55,19 @@ _DETECTA = [('nubank', 'Nubank'), ('nu pagamentos', 'Nubank'), ('nu financeira',
             ('caixa', 'Caixa'), ('inter', 'Inter'), ('c6', 'C6 Bank')]
 
 
-def detect_bank(accounts):
-    text = ' '.join(f"{a.get('name') or ''} {a.get('marketingName') or ''}" for a in accounts).lower()
+def detect_bank(accounts, item=None):
+    """Descobre o banco pelos nomes das contas e pelos dados da conexão."""
+    text = ' '.join(f"{a.get('name') or ''} {a.get('marketingName') or ''} {a.get('owner') or ''} "
+                    f"{(a.get('bankData') or {}).get('transferNumber') or ''}" for a in accounts).lower()
+    try:
+        text += ' ' + json.dumps(item or {}, ensure_ascii=False).lower()
+    except Exception:
+        pass
+    # Código COMPE no número de transferência (ex.: "033/0001/..." = Santander).
+    for code, name in (('260/', 'Nubank'), ('033/', 'Santander'), ('341/', 'Itaú'), ('237/', 'Bradesco'),
+                       ('001/', 'Banco do Brasil'), ('104/', 'Caixa'), ('077/', 'Inter'), ('336/', 'C6 Bank')):
+        if code in text:
+            return name
     for key, name in _DETECTA:
         if key in text:
             return name
@@ -150,7 +161,7 @@ def fetch_snapshot(cfg, date_from, date_to):
         accounts = _request('GET', '/accounts', key, params={'itemId': item_id}).get('results', [])
         entry_item = {'item_id': item_id, 'item': item, 'banco': bank, 'accounts': []}
         if not bank or bank == 'Automático':
-            entry_item['banco'] = detect_bank(accounts) or 'Banco'
+            entry_item['banco'] = detect_bank(accounts, item) or 'Banco'
         for acc in accounts:
             entry = {'account': acc, 'bills': []}
             to = date_to
@@ -181,6 +192,10 @@ def initialize(db):
             db.execute(f'ALTER TABLE pluggy_contas ADD COLUMN {col} TEXT')
     # Uma linha por banco conectado no Meu Pluggy (Nubank, Santander...).
     db.execute("CREATE TABLE IF NOT EXISTS pluggy_itens (item_id TEXT PRIMARY KEY, banco TEXT DEFAULT 'Automático', criado TEXT)")
+    try:
+        cleanup_orphans(db)
+    except Exception:
+        pass
     old = db.execute('SELECT item_id FROM integracao_pluggy WHERE id=1').fetchone()
     if old and old[0] and not db.execute('SELECT 1 FROM pluggy_itens').fetchone():
         db.execute("INSERT OR IGNORE INTO pluggy_itens(item_id,banco,criado) VALUES (?,'Nubank',?)",
@@ -220,9 +235,63 @@ def add_item(db, item_id, bank='Automático'):
 
 
 def remove_item(db, item_id):
-    """Remove a conexão. Os lançamentos já importados continuam no app."""
+    """Remove a conexão e tudo o que veio dela: contas, cartões, compras,
+    pagamentos e faturas. Lançamentos manuais (feitos no app) não são apagados."""
+    accounts = db.execute('SELECT account_id,cartao_id,banco FROM pluggy_contas WHERE item_id=?', (item_id,)).fetchall()
+    bank = next((b for _, _, b in accounts if b), None)
+    for account_id, card_id, _ in accounts:
+        db.execute("DELETE FROM transacoes WHERE origem='pluggy' AND conta_externa=?", (account_id,))
+        db.execute("DELETE FROM compras_cartao WHERE origem='pluggy' AND conta_externa=?", (account_id,))
+        if card_id:
+            _remove_card_if_imported_only(db, card_id)
+    if bank and not db.execute('SELECT 1 FROM pluggy_contas WHERE banco=? AND item_id<>?', (bank, item_id)).fetchone():
+        db.execute('DELETE FROM rendas_banco WHERE banco=?', (bank,))
     db.execute('DELETE FROM pluggy_itens WHERE item_id=?', (item_id,))
     db.execute('DELETE FROM pluggy_contas WHERE item_id=?', (item_id,))
+    cleanup_orphans(db)
+    db.commit()
+
+
+def _remove_card_if_imported_only(db, card_id):
+    """Apaga o cartão se não tiver nada lançado à mão (compras manuais ou assinaturas)."""
+    manual = db.execute("SELECT 1 FROM compras_cartao WHERE cartao_id=? AND (origem IS NULL OR origem<>'pluggy')", (card_id,)).fetchone()
+    subs = db.execute('SELECT 1 FROM assinaturas_cartao WHERE cartao_id=?', (card_id,)).fetchone()
+    db.execute("DELETE FROM compras_cartao WHERE cartao_id=? AND origem='pluggy'", (card_id,))
+    db.execute("DELETE FROM pagamentos_cartao WHERE cartao_id=? AND origem='pluggy'", (card_id,))
+    db.execute('DELETE FROM faturas_banco WHERE cartao_id=?', (card_id,))
+    if not manual and not subs:
+        db.execute('DELETE FROM faturas_pagas WHERE cartao_id=?', (card_id,))
+        db.execute('DELETE FROM cartoes WHERE id=?', (card_id,))
+
+
+def cleanup_orphans(db):
+    """Limpa dados importados de conexões que já foram removidas (versões
+    anteriores do app removiam a conexão mas deixavam o cartão)."""
+    known = {r[0] for r in db.execute('SELECT account_id FROM pluggy_contas')}
+    orphan_cards = set()
+    for table in ('transacoes', 'compras_cartao'):
+        try:
+            rows = db.execute(f"SELECT DISTINCT conta_externa FROM {table} WHERE origem='pluggy'").fetchall()
+        except Exception:
+            continue
+        for (acc,) in rows:
+            if acc and acc not in known:
+                if table == 'compras_cartao':
+                    orphan_cards |= {r[0] for r in db.execute(
+                        "SELECT DISTINCT cartao_id FROM compras_cartao WHERE origem='pluggy' AND conta_externa=?", (acc,))}
+                db.execute(f"DELETE FROM {table} WHERE origem='pluggy' AND conta_externa=?", (acc,))
+    linked = {r[0] for r in db.execute('SELECT cartao_id FROM pluggy_contas WHERE cartao_id IS NOT NULL')}
+    for card_id in orphan_cards - linked:
+        _remove_card_if_imported_only(db, card_id)
+
+
+def set_item_bank(db, item_id, bank):
+    db.execute('UPDATE pluggy_itens SET banco=? WHERE item_id=?', (bank, item_id))
+    db.execute('UPDATE pluggy_contas SET banco=? WHERE item_id=?', (bank, item_id))
+    # Renomeia o cartão criado pela integração (ex.: "Banco •1234" -> "Santander •1234").
+    for card_id, number in db.execute('SELECT p.cartao_id,c.nome FROM pluggy_contas p JOIN cartoes c ON c.id=p.cartao_id WHERE p.item_id=?', (item_id,)).fetchall():
+        suffix = number.split('•', 1)[1] if '•' in number else ''
+        db.execute('UPDATE cartoes SET nome=? WHERE id=?', (bank + (' •' + suffix if suffix else ''), card_id))
     db.commit()
 
 
@@ -710,12 +779,13 @@ def show(app):
         mine = [c for c in contas if c[0] == item_id]
         kinds = ' e '.join(k for k, t in (('conta', 'BANK'), ('cartão', 'CREDIT')) if any(c[1] == t for c in mine))
         row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10))
-        row.add_widget(_icon(ICONES_BANCO.get(bank, 'banco_generico.png'), 40))
+        from movimentacoes import bank_icon
+        row.add_widget(bank_icon(bank, 40))
         words = BoxLayout(orientation='vertical')
         words.add_widget(_text(bank if bank != 'Automático' else 'Banco (detectar na sincronização)', 15, app.WHITE, True))
         words.add_widget(_text((kinds.capitalize() if kinds else 'Aguardando sincronização') + '  •  ' + item_id[:8] + '…', 11, app.MUTED))
         row.add_widget(words)
-        rm = app.button('Remover', lambda *_, i=item_id, b=bank: _confirm_remove(app, i, b), 38, danger=True)
+        rm = app.button('Editar', lambda *_, i=item_id, b=bank: _edit_item(app, i, b), 38)
         rm.size_hint_x = None
         rm.width = dp(92)
         row.add_widget(rm)
@@ -751,10 +821,32 @@ def show(app):
     body.add_widget(app.label('As credenciais ficam salvas só neste aparelho.', 12, app.MUTED, 34))
 
 
+def _edit_item(app, item_id, bank):
+    form = app.form()
+    form.add_widget(app.label('Banco desta conexão', 12, app.MUTED, 22))
+    chooser = app.spinner(bank if bank in BANCOS else 'Outro banco', BANCOS[1:])
+    form.add_widget(chooser)
+    pop = app.popup('Conexão ' + bank, form, 330)
+
+    def save(*_):
+        set_item_bank(app.db, item_id, chooser.text)
+        pop.dismiss()
+        app.refresh()
+
+    def remove(*_):
+        pop.dismiss()
+        _confirm_remove(app, item_id, bank)
+    form.add_widget(app.button('Salvar', save, primary=True))
+    form.add_widget(app.button('Remover conexão', remove, danger=True))
+    form.add_widget(app.button('Cancelar', lambda *_: pop.dismiss()))
+    pop.open()
+
+
 def _confirm_remove(app, item_id, bank):
     form = app.form()
-    form.add_widget(app.label(f'Remover a conexão {bank}? Os lançamentos já importados continuam no app.', 14, app.WHITE, 70))
-    pop = app.popup('Remover banco', form, 260)
+    form.add_widget(app.label(f'Remover {bank}? Saem do app as contas, cartões, compras e faturas importados '
+                              'desta conexão. Seus lançamentos manuais continuam.', 14, app.WHITE, 90))
+    pop = app.popup('Remover banco', form, 290)
 
     def ok(*_):
         remove_item(app.db, item_id)

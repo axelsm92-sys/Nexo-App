@@ -211,6 +211,26 @@ def _icon(name, size=40):
     return Widget(size_hint=(None, None), size=(dp(size), dp(size)))
 
 
+CORES_BANCO = {'nubank': ((.51, .04, .82, 1), 'banco_nubank.png'),
+               'santander': ((.80, 0, 0, 1), 'banco_santander.png'),
+               'itau': ((.93, .45, 0, 1), None), 'bradesco': ((.80, .04, .19, 1), None),
+               'banco do brasil': ((.98, .82, .0, 1), None), 'caixa': ((0, .40, .70, 1), None),
+               'inter': ((1, .48, 0, 1), None), 'c6': ((.15, .15, .15, 1), None)}
+
+
+def bank_icon(bank, size=44):
+    """Ícone do banco: usa o PNG da pasta icones se existir; se não existir
+    (ex.: pasta não enviada ao GitHub), desenha um quadrado colorido com a inicial."""
+    key = unicodedata.normalize('NFKD', bank or '').encode('ascii', 'ignore').decode().lower()
+    color, png = next((v for k, v in CORES_BANCO.items() if k in key), ((.15, .39, .92, 1), 'banco_generico.png'))
+    if png and (ICONS / png).is_file():
+        return _icon(png, size)
+    tile = Label(text=(bank or '?').strip()[:1].upper(), bold=True, font_size=dp(size * .48),
+                 color=(1, 1, 1, 1), size_hint=(None, None), size=(dp(size), dp(size)))
+    _bg(tile, color, size * .25)
+    return tile
+
+
 class Tap(ButtonBehavior, BoxLayout):
     """Linha inteira clicável."""
     def __init__(self, on_tap=None, **kw):
@@ -291,7 +311,7 @@ def connected_accounts_panel(app):
         if balance is not None:
             subtitle += '  •  Saldo ' + app.money(balance)
         row = Tap(on_tap=lambda: app.go('pluggy'), size_hint_y=None, height=dp(56), spacing=dp(12))
-        row.add_widget(_icon(ip.ICONES_BANCO.get(bank, 'banco_generico.png'), 44))
+        row.add_widget(bank_icon(bank, 44))
         words = BoxLayout(orientation='vertical')
         words.add_widget(_text(bank if bank != 'Automático' else 'Banco', 17, app.WHITE, True))
         words.add_widget(_text(subtitle, 12, app.MUTED))
