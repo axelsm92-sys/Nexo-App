@@ -13,7 +13,6 @@ from calendar import monthrange
 from datetime import date
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.spinner import Spinner
 from kivy.uix.checkbox import CheckBox
 
 MAX_PARCELAS = 120
@@ -253,14 +252,14 @@ def _confirm(app, title, text, action, label_ok='Confirmar'):
         action()
         pop.dismiss()
         app.refresh()
-    form.add_widget(app.button(label_ok, ok))
+    form.add_widget(app.button(label_ok, ok, danger=True))
     form.add_widget(app.button('Voltar', lambda *_: pop.dismiss()))
     pop.open()
 
 
 def show(app):
     menu_card = _menu_card()
-    body = app.page_body('CARTAO DE CREDITO')
+    body = app.page_body('CARTÃO DE CRÉDITO')
     month = app.view_month
     body.add_widget(app.label('Faturas de ' + app.month_name(month), 15, app.MUTED, 35))
 
@@ -277,7 +276,7 @@ def show(app):
     bills = invoices(app.db, month)
     body.add_widget(app.label('Total das faturas: ' + app.money(sum(x[3] for x in bills)), 19, app.WHITE, 50, True))
     if not bills:
-        body.add_widget(app.label('Cadastre um cartao para comecar.', 14, app.MUTED, 44))
+        body.add_widget(app.label('Cadastre um cartão para começar.', 14, app.MUTED, 44))
     for cid, name, due, amount, paid in bills:
         content = BoxLayout(orientation='vertical', spacing=dp(5), size_hint_y=None, height=dp(112))
         content.add_widget(app.label(name + ' | Dia ' + str(due), 17, app.WHITE, 34, True))
@@ -298,7 +297,7 @@ def show(app):
         sub = f"{p['cartao']} • {p['categoria']} • {app.money(p['valor'])}"
         body.add_widget(menu_card(title, sub, lambda _, x=p: purchase_details(app, x), height=66))
     if not parts:
-        body.add_widget(app.label('Nenhuma parcela neste mes.', 13, app.MUTED, 40))
+        body.add_widget(app.label('Nenhuma parcela neste mês.', 13, app.MUTED, 40))
 
     # Assinaturas do mes
     subs = subscriptions_in_month(app.db, month)
@@ -308,10 +307,10 @@ def show(app):
         sub = f"{s['cartao']} • {s['categoria']} • {app.money(s['valor'])} • {state}"
         body.add_widget(menu_card(s['descricao'], sub, lambda _, x=s: subscription_details(app, x), height=66))
     if not subs:
-        body.add_widget(app.label('Nenhuma assinatura cobrada neste mes.', 13, app.MUTED, 40))
+        body.add_widget(app.label('Nenhuma assinatura cobrada neste mês.', 13, app.MUTED, 40))
     body.add_widget(app.button('Ver todas as assinaturas (inclui canceladas)', lambda *_: list_subscriptions(app), 44))
 
-    body.add_widget(app.label('Compras no credito entram nos gastos apenas quando a fatura for marcada como paga.', 12, app.MUTED, 70))
+    body.add_widget(app.label('Compras no crédito entram nos gastos apenas quando a fatura for marcada como paga.', 12, app.MUTED, 70))
 
 
 def toggle_bill(app, card_id, month, checked):
@@ -328,12 +327,13 @@ def toggle_bill(app, card_id, month, checked):
 
 def edit_card(app, ident=None, name='', due=10):
     form = app.form()
-    namefield = app.input_field('Nome do cartao', name)
+    namefield = app.input_field('Nome do cartão', name)
     dayfield = app.input_field('Dia de vencimento (1 a 31)', str(due))
     status = app.label('', 12, app.RED, 26)
-    for w in [namefield, dayfield, status]:
+    for w in [app.label('Nome do cartão', 12, app.MUTED, 22), namefield,
+              app.label('Dia de vencimento', 12, app.MUTED, 22), dayfield, status]:
         form.add_widget(w)
-    pop = app.popup('Editar cartao' if ident else 'Novo cartao', form, 270)
+    pop = app.popup('Editar cartão' if ident else 'Novo cartão', form, 340)
 
     def save(*_):
         try:
@@ -350,26 +350,26 @@ def edit_card(app, ident=None, name='', due=10):
         app.db.commit()
         pop.dismiss()
         app.refresh()
-    form.add_widget(app.button('Salvar cartao', save))
+    form.add_widget(app.button('Salvar cartão', save, primary=True))
     pop.open()
 
 
-def _card_spinner(cards):
-    return Spinner(text=cards[0][1], values=tuple(x[1] for x in cards), size_hint_y=None, height=dp(44))
+def _card_spinner(app, cards):
+    return app.spinner(cards[0][1], [x[1] for x in cards])
 
 
 def new_purchase(app):
     cards = app.db.execute('SELECT id,nome FROM cartoes ORDER BY nome').fetchall()
     if not cards:
-        return app.message('Cartao necessario', 'Cadastre primeiro um cartao.')
+        return app.message('Cartão necessário', 'Cadastre primeiro um cartão.')
     cats = _categories(app)
     form = app.form()
-    card = _card_spinner(cards)
-    cat = Spinner(text=cats[0], values=tuple(cats), size_hint_y=None, height=dp(44))
-    desc = app.input_field('Descricao (opcional)')
+    card = _card_spinner(app, cards)
+    cat = app.spinner(cats[0], cats)
+    desc = app.input_field('Descrição (opcional)')
     amount_box, amount = app.money_field()
     count = app.input_field(f'Numero de parcelas (1 a {MAX_PARCELAS})', '1')
-    first = app.input_field('Primeira fatura (AAAA-MM)', app.view_month)
+    first = app.input_field('AAAA-MM', app.view_month)
     preview = app.label('', 13, app.GREEN, 40)
     status = app.label('', 12, app.RED, 25)
 
@@ -390,13 +390,13 @@ def new_purchase(app):
     for field in (amount, count, first):
         field.bind(text=update_preview)
 
-    for w in [app.label('Cartao', 12, app.MUTED, 22), card, app.label('Categoria', 12, app.MUTED, 22), cat,
-              app.label('Descricao', 12, app.MUTED, 22), desc,
+    for w in [app.label('Cartão', 12, app.MUTED, 22), card, app.label('Categoria', 12, app.MUTED, 22), cat,
+              app.label('Descrição', 12, app.MUTED, 22), desc,
               app.label('Valor total da compra', 12, app.MUTED, 22), amount_box,
               app.label('Parcelas', 12, app.MUTED, 22), count,
-              app.label('Mes da primeira fatura', 12, app.MUTED, 22), first, preview, status]:
+              app.label('Mês da primeira fatura', 12, app.MUTED, 22), first, preview, status]:
         form.add_widget(w)
-    pop = app.popup('Nova compra no credito', form, 720)
+    pop = app.popup('Nova compra no crédito', form, 760)
 
     def save(*_):
         try:
@@ -404,11 +404,11 @@ def new_purchase(app):
             cid = next(i for i, nm in cards if nm == card.text)
             add_installment_purchase(app.db, cid, cat.text, value, int(count.text), first.text, desc.text)
         except (ValueError, TypeError):
-            status.text = 'Revise valor, parcelas e mes.'
+            status.text = 'Revise valor, parcelas e mês.'
             return
         pop.dismiss()
         app.refresh()
-    form.add_widget(app.button('Salvar compra', save))
+    form.add_widget(app.button('Salvar compra', save, primary=True))
     pop.open()
 
 
@@ -432,7 +432,7 @@ def purchase_details(app, p):
         _confirm(app, 'Excluir compra',
                  'Remove todas as parcelas desta compra, inclusive de faturas já pagas.',
                  lambda: delete_purchase(app.db, p['id']), 'Excluir compra')
-    form.add_widget(app.button('Excluir compra', remove))
+    form.add_widget(app.button('Excluir compra', remove, danger=True))
     form.add_widget(app.button('Fechar', lambda *_: pop.dismiss()))
     pop.open()
 
@@ -440,20 +440,20 @@ def purchase_details(app, p):
 def new_subscription(app):
     cards = app.db.execute('SELECT id,nome FROM cartoes ORDER BY nome').fetchall()
     if not cards:
-        return app.message('Cartao necessario', 'Cadastre primeiro um cartao.')
+        return app.message('Cartão necessário', 'Cadastre primeiro um cartão.')
     cats = _categories(app)
     form = app.form()
-    card = _card_spinner(cards)
-    cat = Spinner(text=cats[0], values=tuple(cats), size_hint_y=None, height=dp(44))
+    card = _card_spinner(app, cards)
+    cat = app.spinner(cats[0], cats)
     name = app.input_field('Nome (ex.: Netflix, Spotify)')
     amount_box, amount = app.money_field()
-    start = app.input_field('Primeira cobranca (AAAA-MM)', app.view_month)
+    start = app.input_field('AAAA-MM', app.view_month)
     status = app.label('', 12, app.RED, 25)
-    for w in [app.label('Cartao', 12, app.MUTED, 22), card, app.label('Nome da assinatura', 12, app.MUTED, 22), name,
+    for w in [app.label('Cartão', 12, app.MUTED, 22), card, app.label('Nome da assinatura', 12, app.MUTED, 22), name,
               app.label('Categoria', 12, app.MUTED, 22), cat,
               app.label('Valor mensal', 12, app.MUTED, 22), amount_box,
-              app.label('Mes da primeira fatura', 12, app.MUTED, 22), start,
-              app.label('A cobranca se repete todo mes ate voce cancelar.', 12, app.MUTED, 36), status]:
+              app.label('Mês da primeira fatura', 12, app.MUTED, 22), start,
+              app.label('A cobrança se repete todo mês até você cancelar.', 12, app.MUTED, 36), status]:
         form.add_widget(w)
     pop = app.popup('Nova assinatura', form, 640)
 
@@ -462,11 +462,11 @@ def new_subscription(app):
             cid = next(i for i, nm in cards if nm == card.text)
             add_subscription(app.db, cid, name.text, cat.text, app.parse_amount(amount.text), start.text)
         except (ValueError, TypeError):
-            status.text = 'Revise nome, valor e mes.'
+            status.text = 'Revise nome, valor e mês.'
             return
         pop.dismiss()
         app.refresh()
-    form.add_widget(app.button('Salvar assinatura', save))
+    form.add_widget(app.button('Salvar assinatura', save, primary=True))
     pop.open()
 
 
@@ -481,7 +481,7 @@ def subscription_details(app, s):
     status = app.label('', 12, app.RED, 25)
     pop = app.popup('Assinatura', form, 560)
 
-    month_field = app.input_field('Mes (AAAA-MM)', app.view_month)
+    month_field = app.input_field('AAAA-MM', app.view_month)
     form.add_widget(app.label('Mês (cancelamento ou novo preço)', 12, app.MUTED, 22))
     form.add_widget(month_field)
 
@@ -493,7 +493,7 @@ def subscription_details(app, s):
         try:
             cancel_subscription(app.db, s['id'], month_field.text)
         except (ValueError, TypeError) as e:
-            status.text = 'Mes invalido: ' + str(e)
+            status.text = 'Mês inválido: ' + str(e)
             return
         done()
 
@@ -507,7 +507,7 @@ def subscription_details(app, s):
         try:
             change_subscription_value(app.db, s['id'], app.parse_amount(price.text), month_field.text)
         except (ValueError, TypeError) as e:
-            status.text = 'Revise valor e mes: ' + str(e)
+            status.text = 'Revise valor e mês: ' + str(e)
             return
         done()
 
@@ -518,14 +518,14 @@ def subscription_details(app, s):
                  lambda: delete_subscription(app.db, s['id']), 'Excluir')
 
     if active:
-        form.add_widget(app.button('Cancelar (o mês acima é o último cobrado)', cancel))
+        form.add_widget(app.button('Cancelar assinatura (mês acima = último cobrado)', cancel, danger=True))
     else:
-        form.add_widget(app.button('Reativar assinatura', reactivate))
+        form.add_widget(app.button('Reativar assinatura', reactivate, primary=True))
     form.add_widget(app.label('Novo valor mensal a partir do mês acima', 12, app.MUTED, 22))
     form.add_widget(price_box)
     form.add_widget(app.button('Alterar valor', change_price))
     form.add_widget(status)
-    form.add_widget(app.button('Excluir assinatura', remove))
+    form.add_widget(app.button('Excluir assinatura', remove, danger=True))
     form.add_widget(app.button('Fechar', lambda *_: pop.dismiss()))
     pop.open()
 

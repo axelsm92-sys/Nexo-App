@@ -14,7 +14,7 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
 from kivy.uix.button import Button
 from kivy.uix.textinput import TextInput
-from kivy.uix.spinner import Spinner
+from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.popup import Popup
 from kivy.uix.checkbox import CheckBox
 from kivy.uix.image import Image as KivyImage
@@ -30,6 +30,10 @@ import planejamento
 
 BG=(.059,.090,.165,1); CARD=(.11,.15,.21,1); WHITE=(.97,.98,.99,1)
 MUTED=(.62,.68,.74,1); GREEN=(.063,.725,.506,1); RED=(.96,.48,.47,1)
+# Identidade visual compartilhada por campos, botões e janelas.
+FIELD=(.16,.21,.28,1)      # fundo de campos de texto e seletores
+SURFACE=(.19,.25,.32,1)    # botões secundários (visíveis sobre BG e sobre CARD)
+POPUP_BG=(.07,.11,.17,1)
 
 def money(v):
     return 'R$ '+f'{v:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
@@ -41,9 +45,60 @@ def label(t,size=15,color=WHITE,height=32,bold=False):
     w=Label(text=str(t),font_size=dp(size),color=color,bold=bold,size_hint_y=None,height=dp(height),halign='left',valign='middle')
     w.bind(width=lambda obj,width:setattr(obj,'text_size',(width,None)))
     return w
-def button(t,fn,height=46):
-    w=Button(text=t,size_hint_y=None,height=dp(height),background_normal='',background_color=(.20,.25,.29,1),color=WHITE)
-    w.bind(on_press=fn);return w
+def _rounded_bg(widget, color, radius=12):
+    with widget.canvas.before:
+        Color(*color)
+        shape = RoundedRectangle(pos=widget.pos, size=widget.size, radius=[dp(radius)])
+    widget.bind(pos=lambda obj, v: setattr(shape, 'pos', v),
+                size=lambda obj, v: setattr(shape, 'size', v))
+    return shape
+
+def button(t,fn,height=46,primary=False,danger=False):
+    """Botão padrão do app: arredondado; primary=verde, danger=texto vermelho."""
+    w=Button(text=t,size_hint_y=None,height=dp(height),background_normal='',background_down='',
+             background_color=(0,0,0,0),color=BG if primary else (RED if danger else WHITE),
+             bold=primary,font_size=dp(15 if primary else 14),halign='center',valign='middle')
+    w.bind(size=lambda obj,v:setattr(obj,'text_size',(v[0]-dp(16),None)))
+    _rounded_bg(w, GREEN if primary else SURFACE, 13)
+    w.bind(on_release=fn);return w
+
+class NexoSpinnerOption(SpinnerOption):
+    """Opções da lista suspensa no tema escuro."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.background_normal=''
+        self.background_down=''
+        self.background_color=CARD
+        self.color=WHITE
+        self.height=dp(46)
+
+def spinner(text, values, height=48):
+    w=Spinner(text=text,values=tuple(values),size_hint_y=None,height=dp(height),
+              background_normal='',background_down='',background_color=(0,0,0,0),
+              color=WHITE,font_size=dp(15),option_cls=NexoSpinnerOption)
+    _rounded_bg(w, FIELD, 12)
+    return w
+
+def style_input(field):
+    """Aplica o visual escuro (igual ao de Nova transação) a um TextInput."""
+    field.background_normal='';field.background_active=''
+    field.background_color=FIELD
+    field.foreground_color=WHITE;field.cursor_color=GREEN
+    field.hint_text_color=(.45,.51,.58,1)
+    field.font_size=dp(15);field.padding=[dp(12),dp(13),dp(12),dp(10)]
+    return field
+
+def popup(title, content, height, scroll=True):
+    """Janela padrão: fundo escuro, linha verde e rolagem interna para o teclado."""
+    if scroll:
+        sc=ScrollView(do_scroll_x=False,bar_width=dp(3))
+        sc.add_widget(content)
+        content=sc
+    return Popup(title=title,content=content,size_hint=(.94,None),
+                 height=min(dp(height),Window.height*.83),
+                 separator_color=GREEN,background_color=POPUP_BG,
+                 title_color=WHITE,title_size=dp(16))
+
 def modern_button(t, fn, primary=False, height=54):
     bg = GREEN if primary else CARD
     fg = BG if primary else WHITE
@@ -126,12 +181,12 @@ def menu_card(title, subtitle, fn, icon_name=None, primary=False, height=76):
     return root
 
 def input_field(hint,value=''):
-    return TextInput(text=str(value),hint_text=hint,multiline=False,size_hint_y=None,height=dp(46))
+    return style_input(TextInput(text=str(value),hint_text=hint,multiline=False,size_hint_y=None,height=dp(48)))
 def money_field(value=''):
     # Prefixo fixo R$ fora da area digitavel, para evitar apagar o prefixo.
-    box=BoxLayout(size_hint_y=None,height=dp(46),spacing=dp(5))
-    prefix=Label(text='R$',size_hint_x=None,width=dp(42),color=WHITE)
-    field=TextInput(text=str(value),hint_text='0,00',multiline=False,input_filter=None)
+    box=BoxLayout(size_hint_y=None,height=dp(48),spacing=dp(5))
+    prefix=Label(text='R$',size_hint_x=None,width=dp(42),color=MUTED,font_size=dp(15))
+    field=style_input(TextInput(text=str(value),hint_text='0,00',multiline=False,input_filter=None,input_type='number'))
     box.add_widget(prefix);box.add_widget(field)
     return box,field
 def panel(content):
@@ -165,7 +220,7 @@ class FinanceApp(App):
         credito.initialize(self.db)
         planejamento.initialize(self.db)
         self.view_month=date.today().strftime('%Y-%m')
-        self.money=money;self.parse_amount=parse_amount;self.label=label;self.button=button;self.input_field=input_field;self.money_field=money_field;self.panel=panel
+        self.money=money;self.parse_amount=parse_amount;self.label=label;self.button=button;self.input_field=input_field;self.money_field=money_field;self.panel=panel;self.spinner=spinner
         self.WHITE=WHITE;self.MUTED=MUTED;self.GREEN=GREEN;self.RED=RED
         self.root_box=BoxLayout(orientation='vertical')
         if platform=='ios':
@@ -266,11 +321,6 @@ class FinanceApp(App):
         form.add_widget(label('Adiantamento quinzenal  •  dia 15 em diante',14,WHITE,40))
         box_q,field_q=money_field(str(quinzenal).replace('.',','))
         form.add_widget(box_q)
-        for field in (field_m,field_q):
-            field.background_normal='';field.background_active=''
-            field.background_color=(.16,.21,.28,1)
-            field.foreground_color=WHITE;field.cursor_color=GREEN
-            field.hint_text='0,00';field.input_type='number'
         status=label('',12,RED,26);form.add_widget(status)
         def save(*_):
             try:
@@ -425,7 +475,7 @@ class FinanceApp(App):
     def show_fixed(self):
         body=self.page_body('CUSTOS FIXOS')
         body.add_widget(label('Cada mes tem pagamentos independentes. Edicoes de valor afetam apenas o mes selecionado.',13,MUTED,70))
-        body.add_widget(button('+ Cadastrar custo fixo',lambda *_:self.edit_fixed()))
+        body.add_widget(modern_button('+  Cadastrar custo fixo',lambda *_:self.edit_fixed(),primary=True))
         items=planejamento.fixed_rows(self.db,self.view_month)
         month=self.view_month
         paid_ids={i for i,_,_,paid in items if paid}
@@ -460,7 +510,7 @@ class FinanceApp(App):
         val_box,val_field=money_field(str(value).replace('.',',') if ident else '')
         status=label('',12,RED,25)
         for w in [name_field,val_box,status]:form.add_widget(w)
-        pop=Popup(title='Editar custo deste mes' if ident else 'Novo custo fixo',content=form,size_hint=(.93,None),height=dp(315 if ident else 265))
+        pop=popup('Editar custo deste mês' if ident else 'Novo custo fixo',form,330 if ident else 280)
         def save(*_):
             try:v=parse_amount(val_field.text)
             except ValueError:status.text='Informe um valor valido.';return
@@ -469,11 +519,11 @@ class FinanceApp(App):
             if ident:planejamento.update_month(self.db,ident,self.view_month,n,v)
             else:self.db.execute('INSERT INTO custos_fixos(nome,valor,inicio_mes) VALUES (?,?,?)',(n,v,self.view_month))
             self.db.commit();pop.dismiss();self.refresh()
-        form.add_widget(button('Salvar',save))
+        form.add_widget(button('Salvar',save,primary=True))
         if ident:
             def remove(*_):
                 self.db.execute('UPDATE custos_fixos SET ativo=0 WHERE id=?',(ident,));self.db.commit();pop.dismiss();self.refresh()
-            form.add_widget(button('Desativar custo',remove))
+            form.add_widget(button('Desativar custo',remove,danger=True))
         pop.open()
 
     def pay_fixed(self,ident,name,value):
@@ -483,24 +533,25 @@ class FinanceApp(App):
         form=BoxLayout(orientation='vertical',padding=dp(12),spacing=dp(8),size_hint_y=None)
         form.bind(minimum_height=form.setter('height'))
         form.add_widget(label(name+' - '+money(value),16,WHITE,50))
-        pay=Spinner(text='Pix/Debito',values=('Pix/Debito','Dinheiro','Credito','Outro'),size_hint_y=None,height=dp(46))
+        pay=spinner('Pix/Debito',('Pix/Debito','Dinheiro','Credito','Outro'))
         form.add_widget(pay)
-        pop=Popup(title='Registrar pagamento',content=form,size_hint=(.92,None),height=dp(230))
+        pop=popup('Registrar pagamento',form,250)
         def confirm(*_):
             self.db.execute('INSERT INTO transacoes(descricao,categoria,tipo,valor,data,pagamento,fixo_id) VALUES (?,?,?,?,?,?,?)',(name,'Fixo','Despesa',value,self.selected_day(),pay.text,ident))
             self.db.commit();pop.dismiss();self.refresh()
-        form.add_widget(button('Confirmar pagamento',confirm));pop.open()
+        form.add_widget(button('Confirmar pagamento',confirm,primary=True));pop.open()
 
     def show_categories(self):
         body=self.page_body('CATEGORIAS')
         body.add_widget(label('Crie e edite suas categorias de custos variaveis.',13,MUTED,50))
-        body.add_widget(button('+ Nova categoria',lambda *_:self.edit_category()))
+        body.add_widget(modern_button('+  Nova categoria',lambda *_:self.edit_category(),primary=True))
         cats=self.db.execute("SELECT id,nome FROM categorias WHERE grupo='Variavel' ORDER BY nome").fetchall()
         if not cats:body.add_widget(label('Nenhuma categoria criada.',14,MUTED,40))
         for ident,name in cats:
             block=BoxLayout(orientation='horizontal',size_hint_y=None,height=dp(48))
             block.add_widget(label(name,16,WHITE,48))
-            block.add_widget(button('Editar',lambda _,i=ident,n=name:self.edit_category(i,n),48))
+            edit=button('Editar',lambda _,i=ident,n=name:self.edit_category(i,n),44);edit.size_hint_x=None;edit.width=dp(96)
+            block.add_widget(edit)
             body.add_widget(panel(block))
 
     def edit_category(self,ident=None,name=''):
@@ -509,7 +560,7 @@ class FinanceApp(App):
         field=input_field('Ex.: Mercado, Lazer, Cartao...',name)
         status=label('',12,RED,25)
         form.add_widget(field);form.add_widget(status)
-        pop=Popup(title='Categoria variavel',content=form,size_hint=(.9,None),height=dp(220))
+        pop=popup('Categoria variável',form,240)
         def save(*_):
             n=field.text.strip()
             if not n:status.text='Informe um nome.';return
@@ -522,7 +573,7 @@ class FinanceApp(App):
                 self.db.commit()
             except sqlite3.IntegrityError:status.text='Categoria ja existe.';return
             pop.dismiss();self.refresh()
-        form.add_widget(button('Salvar',save));pop.open()
+        form.add_widget(button('Salvar',save,primary=True));pop.open()
 
     def new_transaction(self,*_):
         # Modal escuro com botão Salvar fixo, fora da área rolável.
@@ -537,18 +588,13 @@ class FinanceApp(App):
         form.add_widget(label('Despesa  •  '+self.month_name(self.view_month),12,MUTED,28))
         form.add_widget(label('Valor',13,MUTED,26))
         amount_box,amount=money_field()
-        amount.input_type='number';amount.write_tab=False
-        amount.background_normal='';amount.background_active=''
-        amount.background_color=(.16,.21,.28,1)
-        amount.foreground_color=WHITE;amount.cursor_color=GREEN
+        amount.write_tab=False
         form.add_widget(amount_box)
         form.add_widget(label('Categoria',13,MUTED,26))
         categories=[x[0] for x in self.db.execute(
             "SELECT nome FROM categorias WHERE grupo='Variavel' ORDER BY nome")]
-        cat=Spinner(text=categories[0] if categories else 'Sem categoria',
-                    values=tuple(categories or ['Sem categoria']),
-                    size_hint_y=None,height=dp(48),
-                    background_normal='',background_color=(.16,.21,.28,1),color=WHITE)
+        cat=spinner(categories[0] if categories else 'Sem categoria',
+                    categories or ['Sem categoria'])
         form.add_widget(cat)
         status=label('',12,RED,28)
         form.add_widget(status)
@@ -559,7 +605,8 @@ class FinanceApp(App):
         footer=BoxLayout(size_hint_y=None,height=dp(52),spacing=dp(9))
         pop=Popup(title='Nova transação',content=outer,
                   size_hint=(.94,None),height=min(dp(390),Window.height*.77),
-                  separator_color=GREEN,background_color=(.07,.11,.17,1))
+                  separator_color=GREEN,background_color=POPUP_BG,
+                  title_color=WHITE,title_size=dp(16))
         footer.add_widget(modern_button('Cancelar',lambda *_:pop.dismiss(),height=52))
         def save(*_):
             try:
@@ -583,7 +630,7 @@ class FinanceApp(App):
         pop.open()
 
     def month_name(self,month):
-        names=['Janeiro','Fevereiro','Marco','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro']
+        names=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro']
         y,m=map(int,month.split('-'))
         return f'{names[m-1]} de {y}'
 
@@ -594,13 +641,12 @@ class FinanceApp(App):
 
     def popup(self,title,form,height):
         # Scroll interno para campos nao ficarem inacessiveis com teclado Android.
-        sc=ScrollView(do_scroll_x=False)
-        sc.add_widget(form)
-        # Window.height já está em pixels: aplicar dp() só ao valor de projeto.
-        return Popup(title=title,content=sc,size_hint=(.94,None),height=min(dp(height),Window.height*.83))
+        return popup(title,form,height)
 
     def message(self,title,msg):
-        pop=Popup(title=title,content=label(msg,14,WHITE,80),size_hint=(.9,.35));pop.open()
+        form=self.form();form.add_widget(label(msg,14,WHITE,70))
+        pop=popup(title,form,230)
+        form.add_widget(button('OK',lambda *_:pop.dismiss(),primary=True));pop.open()
     def on_stop(self):
         if hasattr(self,'db'):self.db.close()
 

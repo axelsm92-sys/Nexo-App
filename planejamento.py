@@ -81,7 +81,7 @@ def edit_limit(app,cat):
             if val<0:raise ValueError()
         except ValueError:status.text='Informe um valor valido.';return
         set_limit(app.db,cat,app.view_month,val);pop.dismiss();app.refresh()
-    form.add_widget(app.button('Salvar limite',save));pop.open()
+    form.add_widget(app.button('Salvar limite',save,primary=True));pop.open()
 
 def show(app):
     month=app.view_month

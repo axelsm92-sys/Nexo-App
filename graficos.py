@@ -72,7 +72,7 @@ def vertical_chart(app,body,items,maximum=None,colors=None):
         body.add_widget(strip)
 
 def show(app):
-    body=app.page_body('GRAFICOS')
+    body=app.page_body('GRÁFICOS')
     month=app.view_month
     body.add_widget(app.label('Resumo de '+app.month_name(month),14,app.MUTED,35))
     body.add_widget(app.label('Graficos de despesas efetivamente registradas e faturas pagas.',12,app.MUTED,53))
