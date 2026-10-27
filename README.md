@@ -32,3 +32,10 @@ O banco `financas.db` é criado na pasta privada do aplicativo no primeiro uso; 
 - O identificador `br.com.nexofinancas.nexofinancas` é provisório; defina o identificador definitivo antes de distribuir atualizações de longo prazo.
 - Desinstalar o app ou limpar seu armazenamento pode apagar os dados.
 - `android.api = 34` gera um APK estável para instalação direta. Para publicar na Google Play será preciso subir para 35/36 e revisar o layout (modo edge-to-edge).
+
+## Integração Nubank (Pluggy / Meu Pluggy)
+No app: **Ajustes → Integração Nubank**. Preencha Client ID, Client Secret e Item ID e toque em **Sincronizar agora**.
+Depois disso o app sincroniza sozinho ao abrir (a cada 6 h).
+- **Client Secret** (não a API Key, que expira em 2 h): dashboard.pluggy.ai → Applications → sua aplicação.
+- **Item ID**: Applications → sua aplicação → Demo → Connected Items (conexão feita escolhendo o conector **MeuPluggy**).
+- As credenciais ficam só no banco local do aparelho. **Nunca coloque o Client Secret no código nem no GitHub.**

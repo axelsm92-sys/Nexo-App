@@ -27,6 +27,7 @@ import graficos
 import navegacao
 import periodo
 import planejamento
+import integracao_pluggy
 
 BG=(.059,.090,.165,1); CARD=(.11,.15,.21,1); WHITE=(.97,.98,.99,1)
 MUTED=(.62,.68,.74,1); GREEN=(.063,.725,.506,1); RED=(.96,.48,.47,1)
@@ -219,6 +220,7 @@ class FinanceApp(App):
         self.db.commit()
         credito.initialize(self.db)
         planejamento.initialize(self.db)
+        integracao_pluggy.initialize(self.db)
         self.view_month=date.today().strftime('%Y-%m')
         self.money=money;self.parse_amount=parse_amount;self.label=label;self.button=button;self.input_field=input_field;self.money_field=money_field;self.panel=panel;self.spinner=spinner
         self.WHITE=WHITE;self.MUTED=MUTED;self.GREEN=GREEN;self.RED=RED
@@ -249,6 +251,11 @@ class FinanceApp(App):
             save_error('Falha ao carregar tela inicial')
             self.root_box.clear_widgets()
             self.root_box.add_widget(Label(text='Falha ao abrir Nexo.\nConsulte erro_nexo.txt', color=WHITE))
+        # Sincronização automática com a Pluggy (em segundo plano, não trava a tela).
+        try:
+            integracao_pluggy.auto_sync(self)
+        except Exception:
+            save_error('Falha ao iniciar sincronização Pluggy')
 
     def show_splash(self):
         self.root_box.clear_widgets()
@@ -284,6 +291,9 @@ class FinanceApp(App):
         body.add_widget(label('Personalize seu Nexo.',14,MUTED,54))
         body.add_widget(menu_card('Salários', 'Mensal e adiantamento quinzenal',
                                   lambda *_:self.go('salario'), 'custos_ativo.png'))
+        cfg=integracao_pluggy.get_config(self.db)
+        body.add_widget(menu_card('Integração Nubank', 'Conectado via Pluggy' if cfg['configurado'] else 'Importar conta e cartão automaticamente',
+                                  lambda *_:self.go('pluggy'), 'cartao_ativo.png'))
         body.add_widget(label('Seus dados permanecem armazenados no aplicativo.',12,MUTED,60))
 
     def go(self,page):self.page=page;self.refresh()
@@ -294,6 +304,7 @@ class FinanceApp(App):
         if self.page=='graficos':return graficos.show(self)
         if self.page=='planejamento':return planejamento.show(self)
         if self.page=='salario':return self.show_salary()
+        if self.page=='pluggy':return integracao_pluggy.show(self)
         if self.page=='fixos':return self.show_fixed()
         if self.page=='categorias':return self.show_categories()
         self.show_home()

@@ -7,10 +7,11 @@ source.include_exts = py,png,jpg,jpeg,kv,atlas
 source.exclude_dirs = .git,.github,__pycache__,.kivy,bin,.buildozer,.spyproject,.venv-pc
 version = 0.1.0
 
+# openssl/certifi: conexões HTTPS (Pluggy).
 # sqlite3 é obrigatório: o app usa "import sqlite3" e, no Android,
 # o módulo só existe no APK se a receita sqlite3 for compilada.
 # Versões fixas evitam que o build quebre quando sai uma versão nova.
-requirements = python3,kivy==2.3.1,sqlite3
+requirements = python3,kivy==2.3.1,sqlite3,openssl,certifi
 
 orientation = portrait
 fullscreen = 0
@@ -19,7 +20,8 @@ presplash.filename = nexo_splash.png
 android.presplash_color = #0F172A
 
 # ---------------- Android ----------------
-android.permissions =
+# INTERNET: necessária para a integração com a Pluggy (Nubank).
+android.permissions = INTERNET
 android.archs = arm64-v8a,armeabi-v7a
 # API 34: estável com o bootstrap SDL2 (a API 35 força o modo "edge-to-edge"
 # do Android 15 e a interface fica por baixo da barra de status).
