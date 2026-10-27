@@ -58,6 +58,17 @@ def initialize(db):
     db.execute('CREATE TABLE IF NOT EXISTS faturas_pagas (cartao_id INTEGER NOT NULL, mes TEXT NOT NULL, data_pagamento TEXT NOT NULL, PRIMARY KEY(cartao_id, mes))')
     # fim_mes NULL = assinatura ativa (cobra ate ser cancelada).
     db.execute('CREATE TABLE IF NOT EXISTS assinaturas_cartao (id INTEGER PRIMARY KEY, cartao_id INTEGER NOT NULL, nome TEXT NOT NULL, categoria TEXT NOT NULL, valor REAL NOT NULL, inicio_mes TEXT NOT NULL, fim_mes TEXT, data_cadastro TEXT NOT NULL)')
+    # Parcela informada pelo banco (compras importadas vêm uma linha por parcela),
+    # e marcação de assinatura (NULL = automático, 1 = sim, 0 = não).
+    for col, kind in (('parcela_num', 'INTEGER'), ('parcela_total', 'INTEGER'), ('assinatura', 'INTEGER')):
+        if col not in {r[1] for r in db.execute('PRAGMA table_info(compras_cartao)')}:
+            db.execute(f'ALTER TABLE compras_cartao ADD COLUMN {col} {kind}')
+    if 'fechamento' not in {r[1] for r in db.execute('PRAGMA table_info(cartoes)')}:
+        db.execute('ALTER TABLE cartoes ADD COLUMN fechamento INTEGER')
+    # Pagamentos de fatura (inclusive antecipados) e valor oficial da fatura do banco.
+    db.execute('CREATE TABLE IF NOT EXISTS pagamentos_cartao (id INTEGER PRIMARY KEY, cartao_id INTEGER NOT NULL, valor REAL NOT NULL, data TEXT NOT NULL, mes TEXT NOT NULL, descricao TEXT, externo_id TEXT UNIQUE, origem TEXT)')
+    db.execute('CREATE TABLE IF NOT EXISTS faturas_banco (cartao_id INTEGER NOT NULL, mes TEXT NOT NULL, valor REAL NOT NULL, PRIMARY KEY(cartao_id, mes))')
+    db.execute('CREATE TABLE IF NOT EXISTS marcas_assinatura (chave TEXT PRIMARY KEY, assinatura INTEGER NOT NULL)')
     db.commit()
 
 
@@ -96,19 +107,26 @@ def installment_status(total, count, first_month, month):
 
 def installments_in_month(db, month, card_id=None):
     """Parcelas cobradas no mes. Cada item: dict com dados da compra e da parcela."""
-    sql = ('SELECT p.id,p.cartao_id,c.nome,p.categoria,p.descricao,p.valor_total,p.parcelas,p.primeiro_mes '
+    sql = ('SELECT p.id,p.cartao_id,c.nome,p.categoria,p.descricao,p.valor_total,p.parcelas,p.primeiro_mes,p.origem,p.data_compra,'
+           'p.parcela_num,p.parcela_total,p.assinatura '
            'FROM compras_cartao p JOIN cartoes c ON c.id=p.cartao_id')
     params = ()
     if card_id is not None:
         sql += ' WHERE p.cartao_id=?'
         params = (card_id,)
     result = []
-    for ident, cid, cname, cat, desc, total, count, first in db.execute(sql + ' ORDER BY p.id DESC', params).fetchall():
+    for (ident, cid, cname, cat, desc, total, count, first, origin, bought,
+         pnum, ptot, sub) in db.execute(sql + ' ORDER BY p.data_compra DESC, p.id DESC', params).fetchall():
         index = months_between(first, month)
         if 0 <= index < count:
             result.append({'tipo': 'parcela', 'id': ident, 'cartao_id': cid, 'cartao': cname,
                            'categoria': cat, 'descricao': desc or cat, 'valor': installment_value(total, count, index),
-                           'parcela': index + 1, 'parcelas': count, 'valor_total': total, 'primeiro_mes': first})
+                           'parcela': index + 1, 'parcelas': count, 'valor_total': total, 'primeiro_mes': first,
+                           'origem': origin, 'data_compra': bought,
+                           # Parcela "real": a do app (compra manual) ou a informada pelo banco.
+                           'parc_num': index + 1 if count > 1 else pnum,
+                           'parc_total': count if count > 1 else ptot,
+                           'marcada_assinatura': sub})
     return result
 
 
@@ -211,6 +229,91 @@ def invoices(db, month):
     return result
 
 
+def payment_month(day, due_day):
+    """Fatura que um pagamento quita: a primeira cujo vencimento é no dia do pagamento ou depois."""
+    ym = day[:7]
+    return ym if int(day[8:10]) <= due_day else add_month(ym, 1)
+
+
+def closing_date(month, close_day, due_day):
+    """Data de fechamento da fatura que vence em 'month'."""
+    ym = month if due_day > close_day else add_month(month, -1)
+    y, m = map(int, ym.split('-'))
+    return f'{ym}-{min(close_day, monthrange(y, m)[1]):02d}'
+
+
+def invoice_summary(db, card_id, month):
+    """Resumo da fatura considerando pagamentos antecipados.
+    compras: tudo o que foi comprado e cai nesta fatura (o gasto do mês);
+    antecipado: pagamentos feitos antes do fechamento (abatem a fatura);
+    fatura: valor que o banco cobra (oficial, se o banco informou; senão estimado);
+    pago_depois: pagamentos entre o fechamento e o vencimento;
+    restante: quanto ainda falta pagar."""
+    row = db.execute('SELECT vencimento,fechamento FROM cartoes WHERE id=?', (card_id,)).fetchone()
+    due_day, close_day = (row[0], row[1]) if row else (10, None)
+    compras = round(sum(c['valor'] for c in charges(db, month, card_id)), 2)
+    pays = db.execute('SELECT valor,data FROM pagamentos_cartao WHERE cartao_id=? AND mes=?', (card_id, month)).fetchall()
+    if close_day:
+        cut = closing_date(month, close_day, due_day)
+        antecipado = sum(v for v, d in pays if d < cut)
+    else:
+        antecipado = 0.0
+    total_pago = sum(v for v, _ in pays)
+    official = db.execute('SELECT valor FROM faturas_banco WHERE cartao_id=? AND mes=?', (card_id, month)).fetchone()
+    fatura = round(official[0], 2) if official else round(compras - antecipado, 2)
+    pago_depois = round(total_pago - antecipado, 2)
+    return {'compras': compras, 'antecipado': round(antecipado, 2), 'fatura': fatura,
+            'oficial': bool(official), 'pago_depois': pago_depois,
+            'restante': round(max(0.0, fatura - pago_depois), 2), 'pago_total': round(total_pago, 2)}
+
+
+def subscription_keys(db):
+    """Descrições que se repetem com valor parecido em 2+ faturas = assinatura
+    (Netflix, Spotify...). Marcação manual do usuário tem prioridade."""
+    from movimentacoes import normalize
+    seen = {}
+    for desc, value, month, ptot in db.execute(
+            'SELECT descricao,valor_total,primeiro_mes,parcela_total FROM compras_cartao WHERE parcelas=1'):
+        if ptot and ptot > 1:
+            continue
+        key = normalize(desc)
+        if not key or value <= 0:
+            continue
+        seen.setdefault(key, []).append((month, value))
+    auto = set()
+    for key, rows in seen.items():
+        months = {m for m, _ in rows}
+        values = [v for _, v in rows]
+        if len(months) >= 2 and max(values) <= min(values) * 1.25:
+            auto.add(key)
+    for key, flag in db.execute('SELECT chave,assinatura FROM marcas_assinatura'):
+        (auto.add if flag else auto.discard)(key)
+    return auto
+
+
+def purchase_kind(p, sub_keys):
+    """'parcelada' | 'assinatura' | 'avista'."""
+    from movimentacoes import normalize
+    if p.get('parc_total') and p['parc_total'] > 1:
+        return 'parcelada'
+    flag = p.get('marcada_assinatura')
+    if flag == 1 or (flag is None and normalize(p['descricao']) in sub_keys):
+        return 'assinatura'
+    return 'avista'
+
+
+def set_subscription_flag(db, p, flag):
+    """Marca/desmarca uma compra (e as iguais) como assinatura."""
+    from movimentacoes import normalize
+    key = normalize(p['descricao'])
+    db.execute('INSERT INTO marcas_assinatura(chave,assinatura) VALUES (?,?) '
+               'ON CONFLICT(chave) DO UPDATE SET assinatura=excluded.assinatura', (key, int(flag)))
+    for rid, desc in db.execute('SELECT id,descricao FROM compras_cartao').fetchall():
+        if normalize(desc) == key:
+            db.execute('UPDATE compras_cartao SET assinatura=? WHERE id=?', (int(flag), rid))
+    db.commit()
+
+
 def paid_category_totals(db, month):
     """Gastos por categoria vindos de faturas PAGAS do mes (parcelas e assinaturas)."""
     result = {}
@@ -257,7 +360,69 @@ def _confirm(app, title, text, action, label_ok='Confirmar'):
     pop.open()
 
 
+FILTROS = [('todas', 'Todas'), ('parcelada', 'Parceladas'), ('avista', 'À vista'), ('assinatura', 'Assinaturas')]
+CORES_TIPO = {'parcelada': ((.42, .25, .62, 1), 'PARCELADA'), 'avista': ((.22, .28, .36, 1), 'À VISTA'),
+              'assinatura': ((.05, .38, .36, 1), 'ASSINATURA')}
+
+
+def _invoice_panel(app, cid, name, due, paid, month):
+    from movimentacoes import _card, _text
+    info = invoice_summary(app.db, cid, month)
+    card = _card(app, 4)
+    top = BoxLayout(size_hint_y=None, height=dp(28))
+    top.add_widget(_text(name, 17, app.WHITE, True))
+    top.add_widget(_text('Vence dia ' + str(due), 12, app.MUTED, False, 'right'))
+    card.add_widget(top)
+    card.add_widget(_text('Valor da fatura' + ('' if info['oficial'] else ' (estimado)'), 12, app.MUTED,
+                          size_hint_y=None, height=dp(20)))
+    card.add_widget(_text(app.money(info['fatura']), 24, app.GREEN if paid else app.WHITE, True,
+                          size_hint_y=None, height=dp(36)))
+    rows = [('Compras desta fatura', app.money(info['compras']), app.WHITE)]
+    if info['antecipado'] > 0.004:
+        rows.append(('Pagamento antecipado', '− ' + app.money(info['antecipado']), app.GREEN))
+    if info['pago_depois'] > 0.004:
+        rows.append(('Pago após o fechamento', '− ' + app.money(info['pago_depois']), app.GREEN))
+    rows.append(('Falta pagar', app.money(info['restante']), app.WHITE if info['restante'] > 0.004 else app.GREEN))
+    for left, right, color in rows:
+        line = BoxLayout(size_hint_y=None, height=dp(24))
+        line.add_widget(_text(left, 13, app.MUTED))
+        line.add_widget(_text(right, 13, color, False, 'right'))
+        card.add_widget(line)
+    line = BoxLayout(size_hint_y=None, height=dp(40))
+    check = CheckBox(active=paid, size_hint_x=None, width=dp(42), disabled=info['compras'] <= 0)
+    check.bind(active=lambda _, active, i=cid, m=month: toggle_bill(app, i, m, active))
+    line.add_widget(check)
+    line.add_widget(_text('Fatura paga' if paid else 'Marcar como paga', 14, app.MUTED))
+    card.add_widget(line)
+    return card, info
+
+
+def _purchase_row(app, item, kind, on_tap):
+    from movimentacoes import Tap, _text, _bg
+    color, tag = CORES_TIPO[kind]
+    if kind == 'parcelada' and item.get('parc_num'):
+        tag = f"{item['parc_num']}/{item['parc_total']}x"
+    row = Tap(on_tap=on_tap, size_hint_y=None, height=dp(56), spacing=dp(10))
+    words = BoxLayout(orientation='vertical')
+    words.add_widget(_text(item['descricao'], 15, app.WHITE))
+    when = item.get('data_compra') or ''
+    day = f'{when[8:10]}/{when[5:7]}  •  ' if len(when) >= 10 else ''
+    words.add_widget(_text(f"{day}{item['categoria']}  •  {item['cartao']}", 11, app.MUTED))
+    row.add_widget(words)
+    right = BoxLayout(orientation='vertical', size_hint_x=None, width=dp(112), spacing=dp(2))
+    right.add_widget(_text(app.money(item['valor']), 15, app.WHITE, True, 'right'))
+    chip_line = BoxLayout()
+    chip_line.add_widget(BoxLayout())
+    chip = _text(tag, 9, app.WHITE, True, 'center', size_hint_x=None, width=dp(74))
+    _bg(chip, color, 8)
+    chip_line.add_widget(chip)
+    right.add_widget(chip_line)
+    row.add_widget(right)
+    return row
+
+
 def show(app):
+    from movimentacoes import _card, _divider
     menu_card = _menu_card()
     body = app.page_body('CARTÃO DE CRÉDITO')
     month = app.view_month
@@ -274,43 +439,56 @@ def show(app):
                                   lambda _, i=cid, n=name, d=due: edit_card(app, i, n, d), height=72))
 
     bills = invoices(app.db, month)
-    body.add_widget(app.label('Total das faturas: ' + app.money(sum(x[3] for x in bills)), 19, app.WHITE, 50, True))
     if not bills:
         body.add_widget(app.label('Cadastre um cartão para começar.', 14, app.MUTED, 44))
+    total_label = app.label('', 19, app.WHITE, 46, True)
+    body.add_widget(total_label)
+    total = 0.0
     for cid, name, due, amount, paid in bills:
-        content = BoxLayout(orientation='vertical', spacing=dp(5), size_hint_y=None, height=dp(112))
-        content.add_widget(app.label(name + ' | Dia ' + str(due), 17, app.WHITE, 34, True))
-        content.add_widget(app.label(app.money(amount), 19, app.GREEN if paid else app.WHITE, 34, True))
-        line = BoxLayout(size_hint_y=None, height=dp(42))
-        check = CheckBox(active=paid, size_hint_x=None, width=dp(45), disabled=amount <= 0)
-        check.bind(active=lambda _, active, i=cid, m=month: toggle_bill(app, i, m, active))
-        line.add_widget(check)
-        line.add_widget(app.label('Fatura paga' if paid else 'Marcar como paga', 14, app.MUTED, 42))
-        content.add_widget(line)
-        body.add_widget(app.panel(content))
+        panel, info = _invoice_panel(app, cid, name, due, paid, month)
+        total += info['fatura']
+        body.add_widget(panel)
+    total_label.text = 'Total das faturas: ' + app.money(total)
 
-    # Parcelas do mes
-    body.add_widget(app.label('Parcelas do mês (toque para detalhes)', 18, app.WHITE, 45, True))
-    parts = installments_in_month(app.db, month)
-    for p in parts:
-        title = f"{p['descricao']}  •  {p['parcela']}/{p['parcelas']}"
-        sub = f"{p['cartao']} • {p['categoria']} • {app.money(p['valor'])}"
-        body.add_widget(menu_card(title, sub, lambda _, x=p: purchase_details(app, x), height=66))
-    if not parts:
-        body.add_widget(app.label('Nenhuma parcela neste mês.', 13, app.MUTED, 40))
+    # ---- compras do mês com tipo (parcelada / à vista / assinatura) e filtro
+    sub_keys = subscription_keys(app.db)
+    items = []
+    for p in installments_in_month(app.db, month):
+        items.append((purchase_kind(p, sub_keys), p, lambda x=p: purchase_details(app, x)))
+    for sub in subscriptions_in_month(app.db, month):
+        sub = dict(sub, data_compra='', parc_num=None, parc_total=None)
+        items.append(('assinatura', sub, lambda x=sub: subscription_details(app, x)))
 
-    # Assinaturas do mes
-    subs = subscriptions_in_month(app.db, month)
-    body.add_widget(app.label('Assinaturas do mês: ' + app.money(sum(s['valor'] for s in subs)), 18, app.WHITE, 45, True))
-    for s in subs:
-        state = 'ativa' if s['fim_mes'] is None else 'último mês ' + s['fim_mes']
-        sub = f"{s['cartao']} • {s['categoria']} • {app.money(s['valor'])} • {state}"
-        body.add_widget(menu_card(s['descricao'], sub, lambda _, x=s: subscription_details(app, x), height=66))
-    if not subs:
-        body.add_widget(app.label('Nenhuma assinatura cobrada neste mês.', 13, app.MUTED, 40))
-    body.add_widget(app.button('Ver todas as assinaturas (inclui canceladas)', lambda *_: list_subscriptions(app), 44))
-
-    body.add_widget(app.label('Compras no crédito entram nos gastos apenas quando a fatura for marcada como paga.', 12, app.MUTED, 70))
+    body.add_widget(app.label('Compras do mês', 18, app.WHITE, 36, True))
+    current = getattr(app, 'card_filter', 'todas')
+    tabs = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+    for key, title in FILTROS:
+        sel = [x for x in items if key == 'todas' or x[0] == key]
+        btn = app.button(f'{title} ({len(sel)})', lambda *_, k=key: (setattr(app, 'card_filter', k), app.refresh()),
+                         40, primary=(key == current))
+        btn.font_size = dp(11)
+        tabs.add_widget(btn)
+    body.add_widget(tabs)
+    shown = [x for x in items if current == 'todas' or x[0] == current]
+    soma = sum(x[1]['valor'] for x in shown)
+    resumo = {k: sum(x[1]['valor'] for x in items if x[0] == k) for k, _ in FILTROS[1:]}
+    body.add_widget(app.label(
+        f"Parceladas {app.money(resumo['parcelada'])}  •  À vista {app.money(resumo['avista'])}  •  "
+        f"Assinaturas {app.money(resumo['assinatura'])}", 11, app.MUTED, 26))
+    if not shown:
+        body.add_widget(app.label('Nenhuma compra neste filtro.', 13, app.MUTED, 40))
+    else:
+        box = _card(app, 4)
+        for n, (kind, item, tap) in enumerate(shown):
+            if n:
+                box.add_widget(_divider())
+            box.add_widget(_purchase_row(app, item, kind, tap))
+        body.add_widget(box)
+        body.add_widget(app.label('Total do filtro: ' + app.money(soma), 13, app.WHITE, 30, True))
+    body.add_widget(app.label('Toque numa compra para ver detalhes, mudar a categoria ou marcar como assinatura.', 12, app.MUTED, 40))
+    body.add_widget(app.button('Ver todas as assinaturas cadastradas', lambda *_: list_subscriptions(app), 44))
+    body.add_widget(app.label('"Valor da fatura" já desconta pagamentos antecipados. Nos gastos e gráficos conta o total '
+                              'das compras, pois é o que você consumiu.', 12, app.MUTED, 60))
 
 
 def toggle_bill(app, card_id, month, checked):
@@ -415,17 +593,47 @@ def new_purchase(app):
 def purchase_details(app, p):
     st = installment_status(p['valor_total'], p['parcelas'], p['primeiro_mes'], app.view_month)
     form = app.form()
-    lines = [
-        (p['descricao'], 17, app.WHITE, 34, True),
-        (f"{p['cartao']} • {p['categoria']}", 13, app.MUTED, 28, False),
-        (f"Valor total: {app.money(p['valor_total'])} em {p['parcelas']}x", 14, app.WHITE, 30, False),
-        (f"Parcela deste mês: {p['parcela']}/{p['parcelas']} • {app.money(p['valor'])}", 14, app.WHITE, 30, False),
-        (f"Faltam {st['restantes']} parcela(s), incluindo esta: {app.money(st['saldo'])}", 14, app.GREEN, 30, False),
-        (f"Primeira fatura: {p['primeiro_mes']} • Última: {st['ultimo_mes']}", 13, app.MUTED, 30, False),
-    ]
+    if p['parcelas'] == 1:
+        # Compra à vista ou lançamento importado do Nubank (cada parcela vem separada).
+        when = p.get('data_compra') or ''
+        lines = [
+            (p['descricao'], 17, app.WHITE, 34, True),
+            (f"{p['cartao']} • {p['categoria']}", 13, app.MUTED, 28, False),
+            (f"Valor: {app.money(p['valor'])}", 15, app.WHITE, 30, False),
+            (f"Data da compra: {when[8:10]}/{when[5:7]}/{when[:4]}" if len(when) >= 10 else '', 13, app.MUTED, 26, False),
+            (f"Fatura: {p['primeiro_mes']}", 13, app.MUTED, 26, False),
+        ]
+        if p.get('parc_total') and p['parc_total'] > 1:
+            lines.insert(2, (f"Compra parcelada: parcela {p['parc_num']} de {p['parc_total']}", 14, app.WHITE, 28, False))
+        if p.get('origem') == 'pluggy':
+            lines.append(('Importada automaticamente do Nubank.', 12, app.GREEN, 26, False))
+    else:
+        lines = [
+            (p['descricao'], 17, app.WHITE, 34, True),
+            (f"{p['cartao']} • {p['categoria']}", 13, app.MUTED, 28, False),
+            (f"Valor total: {app.money(p['valor_total'])} em {p['parcelas']}x", 14, app.WHITE, 30, False),
+            (f"Parcela deste mês: {p['parcela']}/{p['parcelas']} • {app.money(p['valor'])}", 14, app.WHITE, 30, False),
+            (f"Faltam {st['restantes']} parcela(s), incluindo esta: {app.money(st['saldo'])}", 14, app.GREEN, 30, False),
+            (f"Primeira fatura: {p['primeiro_mes']} • Última: {st['ultimo_mes']}", 13, app.MUTED, 30, False),
+        ]
     for text, size, color, height, bold in lines:
         form.add_widget(app.label(text, size, color, height, bold))
-    pop = app.popup('Compra parcelada', form, 420)
+    pop = app.popup('Compra no cartão', form, 520)
+
+    def change_category(*_):
+        import movimentacoes
+        pop.dismiss()
+        movimentacoes.category_picker(app, movimentacoes.purchase_item(p), app.refresh)
+    form.add_widget(app.button('Alterar categoria  •  ' + p['categoria'], change_category, primary=True))
+
+    if not (p.get('parc_total') and p['parc_total'] > 1):
+        is_sub = purchase_kind(p, subscription_keys(app.db)) == 'assinatura'
+
+        def toggle_sub(*_):
+            set_subscription_flag(app.db, p, not is_sub)
+            pop.dismiss()
+            app.refresh()
+        form.add_widget(app.button('Não é assinatura' if is_sub else 'Marcar como assinatura', toggle_sub))
 
     def remove(*_):
         pop.dismiss()
@@ -479,7 +687,7 @@ def subscription_details(app, s):
     form.add_widget(app.label('Ativa: cobra todo mês até cancelar' if active else f"Cancelada • último mês cobrado {s['fim_mes']}",
                               14, app.GREEN if active else app.RED, 30))
     status = app.label('', 12, app.RED, 25)
-    pop = app.popup('Assinatura', form, 560)
+    pop = app.popup('Assinatura', form, 620)
 
     month_field = app.input_field('AAAA-MM', app.view_month)
     form.add_widget(app.label('Mês (cancelamento ou novo preço)', 12, app.MUTED, 22))
@@ -516,6 +724,12 @@ def subscription_details(app, s):
         _confirm(app, 'Excluir assinatura',
                  'Apaga a assinatura de TODAS as faturas, inclusive passadas. Para parar de cobrar, use "Cancelar".',
                  lambda: delete_subscription(app.db, s['id']), 'Excluir')
+
+    def change_category(*_):
+        import movimentacoes
+        pop.dismiss()
+        movimentacoes.category_picker(app, movimentacoes.subscription_item(s), app.refresh)
+    form.add_widget(app.button('Alterar categoria  •  ' + s['categoria'], change_category, primary=True))
 
     if active:
         form.add_widget(app.button('Cancelar assinatura (mês acima = último cobrado)', cancel, danger=True))

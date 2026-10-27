@@ -33,6 +33,10 @@ def initialize(db):
         if 'categoria_manual' not in cols:
             db.execute(f'ALTER TABLE {table} ADD COLUMN categoria_manual INTEGER DEFAULT 0')
     db.execute('CREATE TABLE IF NOT EXISTS regras_categoria (chave TEXT PRIMARY KEY, categoria TEXT NOT NULL)')
+    # Ligação de compras do cartão a custos fixos (na conta já existe transacoes.fixo_id).
+    if 'fixo_id' not in {r[1] for r in db.execute('PRAGMA table_info(compras_cartao)')}:
+        db.execute('ALTER TABLE compras_cartao ADD COLUMN fixo_id INTEGER')
+    db.execute('CREATE TABLE IF NOT EXISTS regras_fixo (chave TEXT PRIMARY KEY, fixo_id INTEGER NOT NULL)')
     db.commit()
 
 
@@ -80,42 +84,109 @@ def movements(db, month=None, limit=None):
     for ident, desc, cat, kind, value, day, pay, origin, fixo in db.execute(sql, params):
         items.append({'tipo': 'conta', 'id': ident, 'descricao': desc, 'categoria': cat,
                       'valor': value if kind == 'Receita' else -value, 'data': day,
-                      'origem': origin, 'conta': pay or 'Outro', 'fixo': fixo is not None})
+                      'origem': origin, 'conta': pay or 'Outro', 'fixo': fixo is not None, 'fixo_id': fixo})
     sql = ('SELECT p.id,COALESCE(NULLIF(p.descricao,\'\'),p.categoria),p.categoria,p.valor_total,p.parcelas,'
-           'p.data_compra,p.origem,c.nome FROM compras_cartao p JOIN cartoes c ON c.id=p.cartao_id')
+           'p.data_compra,p.origem,c.nome,p.fixo_id FROM compras_cartao p JOIN cartoes c ON c.id=p.cartao_id')
     params = []
     if month:
         sql += ' WHERE substr(p.data_compra,1,7)=?'
         params.append(month)
-    for ident, desc, cat, total, count, day, origin, card in db.execute(sql, params):
+    for ident, desc, cat, total, count, day, origin, card, fixo in db.execute(sql, params):
         if origin == 'pluggy' and day and day > datetime.now().date().isoformat():
             continue  # parcelas futuras: aparecem nas faturas, não nas movimentações
         label = desc + (f' ({count}x)' if count and count > 1 else '')
         items.append({'tipo': 'cartao', 'id': ident, 'descricao': label, 'categoria': cat,
-                      'valor': -total, 'data': day, 'origem': origin, 'conta': card, 'fixo': False})
+                      'valor': -total, 'data': day, 'origem': origin, 'conta': card, 'fixo': fixo is not None,
+                      'fixo_id': fixo})
     items.sort(key=lambda x: (x['data'] or '', x['id']), reverse=True)
     return items[:limit] if limit else items
 
 
+TABELAS = {'conta': ('transacoes', 'descricao'), 'cartao': ('compras_cartao', 'descricao'),
+           'assinatura': ('assinaturas_cartao', 'nome')}
+
+
 def set_category(db, item, category, apply_all=False):
     """Altera a categoria; com apply_all, vale para todas as movimentações com a
-    mesma descrição e para as próximas importadas."""
-    table = 'transacoes' if item['tipo'] == 'conta' else 'compras_cartao'
-    db.execute(f'UPDATE {table} SET categoria=?,categoria_manual=1 WHERE id=?', (category, item['id']))
+    mesma descrição (conta, cartão e assinaturas) e para as próximas importadas."""
+    table, _ = TABELAS[item['tipo']]
+    manual = ',categoria_manual=1' if table != 'assinaturas_cartao' else ''
+    db.execute(f'UPDATE {table} SET categoria=?{manual} WHERE id=?', (category, item['id']))
     changed = 1
     if apply_all:
         key = normalize(item['descricao'])
         if key:
             db.execute('INSERT INTO regras_categoria(chave,categoria) VALUES (?,?) '
                        'ON CONFLICT(chave) DO UPDATE SET categoria=excluded.categoria', (key, category))
-            for tbl, col in (('transacoes', 'descricao'), ('compras_cartao', 'descricao')):
+            for tbl, col in TABELAS.values():
                 extra = " AND tipo='Despesa' AND fixo_id IS NULL" if tbl == 'transacoes' else ''
+                flag = ',categoria_manual=1' if tbl != 'assinaturas_cartao' else ''
                 for rid, desc in db.execute(f'SELECT id,{col} FROM {tbl} WHERE 1=1{extra}').fetchall():
                     if normalize(desc) == key and not (tbl == table and rid == item['id']):
-                        db.execute(f'UPDATE {tbl} SET categoria=?,categoria_manual=1 WHERE id=?', (category, rid))
+                        db.execute(f'UPDATE {tbl} SET categoria=?{flag} WHERE id=?', (category, rid))
                         changed += 1
     db.commit()
     return changed
+
+
+def fixed_costs(db):
+    return db.execute('SELECT id,nome,valor FROM custos_fixos WHERE ativo=1 ORDER BY nome').fetchall()
+
+
+def _unlink_manual_duplicate(db, fixo_id, month, keep_table, keep_id):
+    """Se o custo fixo já tinha sido marcado à mão no mês (checkbox), apaga esse
+    lançamento manual: a transação real do banco passa a representar o pagamento."""
+    db.execute('DELETE FROM transacoes WHERE fixo_id=? AND substr(data,1,7)=? AND origem IS NULL AND NOT (?=\'transacoes\' AND id=?)',
+               (fixo_id, month, keep_table, keep_id))
+
+
+def set_fixed(db, item, fixo_id, apply_all=False):
+    """Liga (fixo_id) ou desliga (None) a movimentação de um custo fixo."""
+    table = {'conta': 'transacoes', 'cartao': 'compras_cartao'}.get(item['tipo'])
+    if not table:
+        return 0
+    db.execute(f'UPDATE {table} SET fixo_id=? WHERE id=?', (fixo_id, item['id']))
+    if fixo_id and item.get('data'):
+        _unlink_manual_duplicate(db, fixo_id, item['data'][:7], table, item['id'])
+    changed = 1
+    if apply_all:
+        key = normalize(item['descricao'])
+        if key:
+            if fixo_id:
+                db.execute('INSERT INTO regras_fixo(chave,fixo_id) VALUES (?,?) ON CONFLICT(chave) DO UPDATE SET fixo_id=excluded.fixo_id', (key, fixo_id))
+            else:
+                db.execute('DELETE FROM regras_fixo WHERE chave=?', (key,))
+            changed += apply_fixed_rules(db, only_key=key, value=fixo_id)
+    db.commit()
+    return changed
+
+
+def apply_fixed_rules(db, only_key=None, value=None):
+    """Aplica as regras de custo fixo às movimentações (usado após cada sincronização)."""
+    rules = {only_key: value} if only_key else dict(db.execute('SELECT chave,fixo_id FROM regras_fixo').fetchall())
+    if not rules:
+        return 0
+    n = 0
+    for table, date_col, extra in (('transacoes', 'data', " AND tipo='Despesa'"), ('compras_cartao', 'data_compra', '')):
+        for rid, desc, day, cur in db.execute(f'SELECT id,descricao,{date_col},fixo_id FROM {table} WHERE 1=1{extra}').fetchall():
+            key = normalize(desc)
+            if key in rules and cur != rules[key]:
+                db.execute(f'UPDATE {table} SET fixo_id=? WHERE id=?', (rules[key], rid))
+                if rules[key] and day:
+                    _unlink_manual_duplicate(db, rules[key], day[:7], table, rid)
+                n += 1
+    return n
+
+
+def purchase_item(p):
+    """Converte uma parcela/compra do módulo do cartão para o seletor de categoria."""
+    return {'tipo': 'cartao', 'id': p['id'], 'descricao': p['descricao'], 'categoria': p['categoria'],
+            'valor': -float(p['valor']), 'data': p.get('data_compra') or p.get('primeiro_mes', ''), 'conta': p['cartao'], 'fixo': False}
+
+
+def subscription_item(s):
+    return {'tipo': 'assinatura', 'id': s['id'], 'descricao': s['descricao'], 'categoria': s['categoria'],
+            'valor': -float(s['valor']), 'data': s.get('inicio_mes', ''), 'conta': s['cartao'], 'fixo': False}
 
 
 # ---------------------------------------------------------------- componentes
@@ -201,31 +272,33 @@ def connected_accounts_panel(app):
 
     if not cfg['configurado']:
         row = Tap(on_tap=lambda: app.go('pluggy'), size_hint_y=None, height=dp(56), spacing=dp(12))
-        row.add_widget(_icon('banco_nubank.png', 44))
+        row.add_widget(_icon('banco_generico.png', 44))
         words = BoxLayout(orientation='vertical')
-        words.add_widget(_text('Conectar Nubank', 16, app.WHITE, True))
-        words.add_widget(_text('Importe conta e cartão automaticamente', 12, app.MUTED))
+        words.add_widget(_text('Conectar bancos', 16, app.WHITE, True))
+        words.add_widget(_text('Nubank, Santander e outros: importação automática', 12, app.MUTED))
         row.add_widget(words)
         row.add_widget(_text('>', 18, app.WHITE, size_hint_x=None, width=dp(16)))
         card.add_widget(row)
         return card
 
-    contas = app.db.execute('SELECT tipo,nome,saldo FROM pluggy_contas').fetchall()
-    kinds = {t for t, _, _ in contas}
-    subtitle = ' e '.join(x for x, k in (('Conta', 'BANK'), ('cartão', 'CREDIT')) if k in kinds) or 'Aguardando 1ª sincronização'
-    subtitle = subtitle[0].upper() + subtitle[1:]
-    bank_balance = next((s for t, _, s in contas if t == 'BANK'), None)
-    if bank_balance is not None:
-        subtitle += '  •  Saldo ' + app.money(bank_balance)
-    row = Tap(on_tap=lambda: app.go('pluggy'), size_hint_y=None, height=dp(56), spacing=dp(12))
-    row.add_widget(_icon('banco_nubank.png', 44))
-    words = BoxLayout(orientation='vertical')
-    words.add_widget(_text('Nubank', 17, app.WHITE, True))
-    words.add_widget(_text(subtitle, 12, app.MUTED))
-    row.add_widget(words)
-    row.add_widget(_icon('alerta.png' if failed else 'check.png', 24))
-    card.add_widget(row)
-    card.add_widget(_divider())
+    contas = app.db.execute('SELECT item_id,tipo,nome,saldo FROM pluggy_contas').fetchall()
+    for n, (item_id, bank) in enumerate(cfg['itens']):
+        mine = [c for c in contas if c[0] == item_id] or ([c for c in contas if c[0] is None] if n == 0 else [])
+        kinds = {c[1] for c in mine}
+        subtitle = ' e '.join(x for x, k in (('Conta', 'BANK'), ('cartão', 'CREDIT')) if k in kinds) or 'Aguardando sincronização'
+        subtitle = subtitle[0].upper() + subtitle[1:]
+        balance = next((c[3] for c in mine if c[1] == 'BANK'), None)
+        if balance is not None:
+            subtitle += '  •  Saldo ' + app.money(balance)
+        row = Tap(on_tap=lambda: app.go('pluggy'), size_hint_y=None, height=dp(56), spacing=dp(12))
+        row.add_widget(_icon(ip.ICONES_BANCO.get(bank, 'banco_generico.png'), 44))
+        words = BoxLayout(orientation='vertical')
+        words.add_widget(_text(bank if bank != 'Automático' else 'Banco', 17, app.WHITE, True))
+        words.add_widget(_text(subtitle, 12, app.MUTED))
+        row.add_widget(words)
+        row.add_widget(_icon('alerta.png' if failed else 'check.png', 24))
+        card.add_widget(row)
+        card.add_widget(_divider())
 
     # Botão "Sincronizar movimentações"
     sync = Tap(orientation='vertical', size_hint_y=None, height=dp(70), padding=[dp(10), dp(8)])
@@ -254,7 +327,7 @@ def connected_accounts_panel(app):
             return
         sync.disabled = True
         title.text = 'Sincronizando...'
-        info.text = 'Buscando dados no Nubank via Pluggy'
+        info.text = 'Buscando dados dos bancos via Pluggy'
         if not ip.sync(app, on_done=done):
             sync.disabled = False
             title.text = 'Sincronizar movimentações'
@@ -325,9 +398,7 @@ def category_picker(app, item, on_change=None):
     sign = '−' if item['valor'] < 0 else '+'
     form.add_widget(app.label(item['descricao'], 16, app.WHITE, 30, True))
     form.add_widget(app.label(f"{sign} {app.money(abs(item['valor']))}  •  {item['data']}  •  "
-                              + ('Cartão ' if item['tipo'] == 'cartao' else '') + item['conta'], 12, app.MUTED, 26))
-    if item.get('fixo'):
-        form.add_widget(app.label('Este lançamento é um custo fixo (categoria "Fixo").', 12, app.MUTED, 26))
+                              + {'cartao': 'Cartão ', 'assinatura': 'Assinatura • '}.get(item['tipo'], '') + item['conta'], 12, app.MUTED, 26))
     cats = categories(app.db)
     if item['categoria'] not in cats and item['categoria'] not in ('Fixo', 'Receita'):
         cats.append(item['categoria'])
@@ -351,6 +422,17 @@ def category_picker(app, item, on_change=None):
     chooser.bind(text=toggle_new)
     toggle_new(chooser, chooser.text)
 
+    # Custo fixo: liga a transação ao custo para ele aparecer como pago sem lançar de novo.
+    NAO_FIXO, NOVO_FIXO = 'Não é custo fixo', '+ Cadastrar como novo custo fixo'
+    fixos = fixed_costs(app.db) if item['tipo'] in ('conta', 'cartao') and item['valor'] < 0 else []
+    fixed_chooser = None
+    if item['tipo'] in ('conta', 'cartao') and item['valor'] < 0:
+        names = {f[0]: f[1] for f in fixos}
+        form.add_widget(app.label('Custo fixo', 12, app.MUTED, 22))
+        fixed_chooser = app.spinner(names.get(item.get('fixo_id'), NAO_FIXO), [NAO_FIXO] + [f[1] for f in fixos] + [NOVO_FIXO])
+        form.add_widget(fixed_chooser)
+        form.add_widget(app.label('Ligada a um custo fixo, a transação marca o custo como pago no mês, sem descontar em dobro.', 11, app.MUTED, 34))
+
     line = BoxLayout(size_hint_y=None, height=dp(46))
     same = CheckBox(active=False, size_hint_x=None, width=dp(44))
     line.add_widget(same)
@@ -358,7 +440,7 @@ def category_picker(app, item, on_change=None):
     form.add_widget(line)
     status = app.label('', 12, app.RED, 24)
     form.add_widget(status)
-    pop = app.popup('Categoria da movimentação', form, 470)
+    pop = app.popup('Editar movimentação', form, 600 if fixed_chooser else 470)
 
     def save(*_):
         try:
@@ -367,11 +449,23 @@ def category_picker(app, item, on_change=None):
             status.text = 'Digite o nome da nova categoria.'
             return
         n = set_category(app.db, item, cat, same.active)
+        if fixed_chooser is not None:
+            choice = fixed_chooser.text
+            if choice == NOVO_FIXO:
+                cur = app.db.execute('INSERT INTO custos_fixos(nome,valor,inicio_mes) VALUES (?,?,?)',
+                                     (item['descricao'][:40], abs(item['valor']), (item.get('data') or '')[:7] or None))
+                fid = cur.lastrowid
+            elif choice == NAO_FIXO:
+                fid = None
+            else:
+                fid = next(f[0] for f in fixos if f[1] == choice)
+            if fid != item.get('fixo_id'):
+                set_fixed(app.db, item, fid, same.active)
         pop.dismiss()
         if on_change:
             on_change()
         if n > 1:
             app.message('Categoria aplicada', f'{n} movimentações agora estão em "{cat}".')
-    form.add_widget(app.button('Salvar categoria', save, primary=True))
+    form.add_widget(app.button('Salvar', save, primary=True))
     form.add_widget(app.button('Cancelar', lambda *_: pop.dismiss()))
     pop.open()

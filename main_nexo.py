@@ -294,7 +294,7 @@ class FinanceApp(App):
         body.add_widget(menu_card('Salários', 'Mensal e adiantamento quinzenal',
                                   lambda *_:self.go('salario'), 'custos_ativo.png'))
         cfg=integracao_pluggy.get_config(self.db)
-        body.add_widget(menu_card('Integração Nubank', 'Conectado via Pluggy' if cfg['configurado'] else 'Importar conta e cartão automaticamente',
+        body.add_widget(menu_card('Contas conectadas', ', '.join(b for _,b in cfg['itens']) + ' via Pluggy' if cfg['configurado'] else 'Nubank, Santander: importar automaticamente',
                                   lambda *_:self.go('pluggy'), 'cartao_ativo.png'))
         body.add_widget(label('Seus dados permanecem armazenados no aplicativo.',12,MUTED,60))
 
@@ -322,6 +322,26 @@ class FinanceApp(App):
 
     def salary_values(self):
         return self.db.execute('SELECT mensal,quinzenal FROM configuracao_salario WHERE id=1').fetchone()
+
+    def effective_salary(self, month, for_ratio=False):
+        """Salário usado nos cálculos: (mensal 1-14, quinzenal 15-fim, origem).
+        1º o cadastrado em Ajustes > Salários; senão o salário detectado no banco
+        pela integração. Se as entradas já são importadas como Receita, elas já
+        entram no saldo e não são somadas de novo (exceto para proporções)."""
+        m, q = self.salary_values()
+        if (m or 0) + (q or 0) > 0:
+            return float(m or 0), float(q or 0), 'cadastrado'
+        first, second, other = integracao_pluggy.detected_income(self.db, month)
+        imports = bool(integracao_pluggy.get_config(self.db)['importar_receitas'])
+        if first + second > 0:
+            if imports and not for_ratio:
+                return 0.0, 0.0, 'receitas'
+            return first, second, 'banco'
+        if for_ratio:
+            inc = self.db.execute("SELECT COALESCE(SUM(valor),0) FROM transacoes WHERE tipo='Receita' AND substr(data,1,7)=?", (month,)).fetchone()[0]
+            if inc or other:
+                return float(inc or other), 0.0, 'entradas'
+        return 0.0, 0.0, 'nenhum'
 
     def show_salary(self):
         body=self.page_body('SALÁRIOS')
@@ -373,10 +393,10 @@ class FinanceApp(App):
         credit_first,credit_second=credito.paid_in_period(self.db,month)
         expense+=credit_first+credit_second
         first+=credit_first;second+=credit_second
-        monthly,advance=self.salary_values()
+        monthly,advance,salary_source=self.effective_salary(month)
         total_salary=monthly+advance
         summary=BoxLayout(orientation='vertical',size_hint_y=None,height=dp(164))
-        for x in [label('Disponivel (salarios + outras receitas - gastos)',12,MUTED,36),label(money(total_salary+income-expense),26,WHITE,48,True),label('Salarios cadastrados: '+money(total_salary),13,GREEN),label('Outras receitas: '+money(income),13,GREEN),label('Despesas pagas/lancadas: '+money(expense),13,RED)]:summary.add_widget(x)
+        for x in [label('Disponivel (salarios + outras receitas - gastos)',12,MUTED,36),label(money(total_salary+income-expense),26,WHITE,48,True),label(('Salário recebido (banco): ' if salary_source=='banco' else 'Salarios cadastrados: ')+money(total_salary),13,GREEN),label('Outras receitas: '+money(income),13,GREEN),label('Despesas pagas/lancadas: '+money(expense),13,RED)]:summary.add_widget(x)
         body.add_widget(panel(summary))
         body.add_widget(movimentacoes.connected_accounts_panel(self))
         periods=BoxLayout(orientation='vertical',size_hint_y=None,height=dp(155))
@@ -408,8 +428,9 @@ class FinanceApp(App):
         body=self.page_body('QUANTO GASTEI?')
         month=self.view_month
         previous=periodo.add_month(month,-1)
-        monthly,advance=self.salary_values()
+        monthly,advance,salary_source=self.effective_salary(month,for_ratio=True)
         salary=float(monthly or 0)+float(advance or 0)
+        salary_word={'cadastrado':'do seu salário','banco':'do salário recebido no banco','entradas':'das entradas do mês'}.get(salary_source,'do seu salário')
         current_month=date.today().strftime('%Y-%m')
         # No mês corrente, comparar o mesmo número de dias do mês anterior.
         cutoff=date.today().day if month==current_month else None
@@ -435,7 +456,7 @@ class FinanceApp(App):
         add(label('Gastos variáveis • '+self.month_name(month),14,MUTED,42))
         add(label(money(total),25,WHITE,52,True))
         if salary>0:
-            add(label(f'{100*total/salary:.1f}% do seu salário destinado a gastos variáveis'.replace('.',','),13,GREEN,50))
+            add(label(f'{100*total/salary:.1f}'.replace('.',',')+f'% {salary_word} destinado a gastos variáveis',13,GREEN,50))
         add(label('COMPARAÇÃO COM '+self.month_name(previous).upper(),13,MUTED,42,True))
         if old_total>0:
             diff=total-old_total
@@ -458,9 +479,9 @@ class FinanceApp(App):
             content=BoxLayout(orientation='vertical',size_hint_y=None,height=dp(118),spacing=dp(3))
             content.add_widget(label(category+'  •  '+money(amount),16,WHITE,38,True))
             if salary>0:
-                content.add_widget(label(f'Equivale a {100*amount/salary:.1f}% do seu salário'.replace('.',','),13,MUTED,32))
+                content.add_widget(label('Equivale a '+f'{100*amount/salary:.1f}'.replace('.',',')+f'% {salary_word}',13,MUTED,32))
             else:
-                content.add_widget(label('Cadastre o salário para ver a proporção.',12,MUTED,32))
+                content.add_widget(label('Sem salário no mês: cadastre em Ajustes ou aguarde a sincronização.',12,MUTED,32))
             before=old.get(category,0.0)
             change=amount-before
             if before>0:
@@ -496,7 +517,13 @@ class FinanceApp(App):
             check=CheckBox(active=ident in paid_ids,size_hint_x=None,width=dp(45))
             check.bind(active=lambda _,active,i=ident,n=name,v=value:self.toggle_fixed(i,n,v,active))
             line.add_widget(check);line.add_widget(label(name+'  -  '+money(value),15,WHITE,42,True))
+            src=self.db.execute("SELECT pagamento,origem FROM transacoes WHERE fixo_id=? AND substr(data,1,7)=?",(ident,month)).fetchone()
+            card_src=None if src else self.db.execute("SELECT 1 FROM compras_cartao WHERE fixo_id=? AND substr(data_compra,1,7)=?",(ident,month)).fetchone()
             block.add_widget(line)
+            if (src and src[1]=='pluggy') or card_src:
+                check.disabled=True
+                block.add_widget(label('Pago via '+('cartão de crédito' if card_src else src[0])+' (transação do banco ligada a este custo)',11,GREEN,22))
+                block.height=dp(122)
             block.add_widget(button('Editar custo',lambda _,i=ident,n=name,v=value:self.edit_fixed(i,n,v),40))
             body.add_widget(panel(block))
 

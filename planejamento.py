@@ -23,6 +23,10 @@ def fixed_rows(db, month):
         if start and month<start:continue
         # Historico ja registrado continua visivel mesmo se o custo for desativado.
         recorded=db.execute('SELECT 1 FROM transacoes WHERE fixo_id=? AND substr(data,1,7)=?',(ident,month)).fetchone()
+        # Também conta como pago se uma compra do cartão foi ligada a este custo fixo.
+        if not recorded:
+            try:recorded=db.execute('SELECT 1 FROM compras_cartao WHERE fixo_id=? AND substr(data_compra,1,7)=?',(ident,month)).fetchone()
+            except Exception:recorded=None
         if not active and not recorded and not override:continue
         n,v=override if override else (name,value)
         result.append((ident,n,float(v),bool(recorded)))
@@ -91,7 +95,7 @@ def show(app):
     rows=app.db.execute('SELECT tipo,valor FROM transacoes WHERE substr(data,1,7)=?',(month,)).fetchall()
     incomes=sum(v for t,v in rows if t=='Receita')
     expenses=sum(v for t,v in rows if t=='Despesa')+sum(t for _,_,_,t,p in invoices(app.db,month) if p)
-    m,q=app.salary_values();available=m+q+incomes-expenses
+    m,q,_=app.effective_salary(month);available=m+q+incomes-expenses
     for title,value,col in [('Saldo disponivel',available,app.GREEN),('Fixos pendentes',fixed,app.WHITE),('Faturas pendentes',bills,app.WHITE),('Saldo previsto',available-fixed-bills,app.GREEN if available>=fixed+bills else app.RED)]:
         body.add_widget(app.label(title+': '+app.money(value),15,col,45,True))
     body.add_widget(app.label('Limites por categoria (toque para editar)',17,app.WHITE,48,True))
