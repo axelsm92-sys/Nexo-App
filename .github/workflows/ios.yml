@@ -1,9 +1,14 @@
 name: Gerar app iOS Nexo Alpha
 
-# Executado manualmente (Actions > Gerar app iOS Nexo Alpha > Run workflow).
+# Roda manualmente (Actions > Gerar app iOS Nexo Alpha > Run workflow) e,
+# automaticamente, só quando o próprio ios.yml é alterado.
 # Runners macOS consomem mais minutos do GitHub, por isso não roda a cada push.
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/ios.yml"
 
 jobs:
   build-ios:

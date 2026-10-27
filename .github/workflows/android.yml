@@ -4,8 +4,15 @@ on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
+    # Mudanças só no workflow do iOS (ou em textos) não geram APK novo.
+    paths-ignore:
+      - ".github/workflows/ios.yml"
+      - "**.md"
   pull_request:
     branches: [ "main" ]
+    paths-ignore:
+      - ".github/workflows/ios.yml"
+      - "**.md"
 
 jobs:
   build-android:
