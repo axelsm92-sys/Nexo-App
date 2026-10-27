@@ -39,7 +39,10 @@ jobs:
           key: kivy-ios-2025.5.17-${{ runner.arch }}
 
       - name: Compilar Python + Kivy para iOS
-        run: toolchain build python3 kivy
+        run: |
+          toolchain build python3 openssl kivy
+          # certifi: certificados para HTTPS (integração Pluggy).
+          toolchain pip install certifi
 
       - name: Preparar pasta do app (somente código e imagens)
         run: |
