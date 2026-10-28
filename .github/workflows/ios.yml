@@ -106,9 +106,10 @@ jobs:
       - name: Resumo do log
         if: always()
         run: |
-          # Últimas linhas (onde costuma estar o erro) + linhas com "error".
-          { echo "=== ULTIMAS 300 LINHAS ==="; tail -n 300 ios_build.log 2>/dev/null;
-            echo; echo "=== LINHAS COM ERRO ==="; grep -n -i -E "error|failed|exception" ios_build.log 2>/dev/null | tail -n 80; } > erro_resumo_ios.txt || true
+          # Resultado do build + somente erros reais do compilador (não os nomes de configurações).
+          { echo "=== RESULTADO ==="; grep -E "BUILD SUCCEEDED|BUILD FAILED|App gerado|architecture" ios_build.log 2>/dev/null;
+            echo; echo "=== ERROS ==="; grep -n -E "error:|BUILD FAILED|Traceback|Exception:" ios_build.log 2>/dev/null | tail -n 80 || echo "nenhum";
+            echo; echo "=== ULTIMAS 150 LINHAS ==="; tail -n 150 ios_build.log 2>/dev/null; } > resumo_ios.txt || true
 
       - name: Publicar log do build
         if: always()
@@ -116,6 +117,6 @@ jobs:
         with:
           name: log-ios
           path: |
-            erro_resumo_ios.txt
+            resumo_ios.txt
             ios_build.log
           if-no-files-found: ignore
